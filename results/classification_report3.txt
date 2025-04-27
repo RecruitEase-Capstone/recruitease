@@ -1,0 +1,17 @@
+                    precision    recall  f1-score   support
+
+            UNKNOWN     0.0000    0.0000    0.0000         0
+               Name     0.8222    0.9024    0.8605        41
+Years of Experience     0.0000    0.0000    0.0000         5
+             Degree     0.2647    0.2647    0.2647        34
+        Designation     0.1527    0.2273    0.1826        88
+             Skills     0.5866    0.5628    0.5745       963
+      Email Address     0.8512    0.8458    0.8485      1109
+           Location     0.3372    0.5370    0.4143        54
+       College Name     0.0702    0.2759    0.1119        29
+Companies worked at     0.1006    0.3214    0.1532        56
+    Graduation Year     0.0000    0.0000    0.0000        15
+
+          micro avg     0.6115    0.6688    0.6389      2394
+          macro avg     0.2896    0.3579    0.3100      2394
+       weighted avg     0.6645    0.6688    0.6636      2394
