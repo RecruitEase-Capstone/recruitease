@@ -1,0 +1,13 @@
+/dataset
+/.venv
+/checkpoints
+/model
+/src/ml/__pycache__
+
+results/final_bert_ner_model.bin
+results/final_token_classifier_model.bin
+results/model-state.bin
+results/model-state1.bin
+results/model-state3.bin
+results/model-state4.bin
+results/model-state5.bin
