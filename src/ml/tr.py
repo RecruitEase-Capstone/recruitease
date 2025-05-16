@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-import fitz  # PyMuPDF
+import fitz 
 import os
 from transformers import AutoTokenizer, BertForTokenClassification
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -9,7 +9,6 @@ from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords, wordnet
 from nltk import pos_tag
 from nltk.stem import WordNetLemmatizer
-
 
 class ResumeNERPredictor:
     """
@@ -47,7 +46,7 @@ class ResumeNERPredictor:
         
         # Define tags
         tag_vals = set(['X', '[CLS]', '[SEP]', 'O', 
-                       'B-NAME', 'I-NAME', 'L-NAME', 'U-NAME',
+                       'B-NAME', 'I-NAME', 'L-NAME',
                        'B-CLG', 'I-CLG', 'L-CLG', 'U-CLG',
                        'B-DEG', 'I-DEG', 'L-DEG', 'U-DEG',
                        'B-GRADYEAR', 'I-GRADYEAR', 'L-GRADYEAR', 'U-GRADYEAR',
@@ -63,18 +62,26 @@ class ResumeNERPredictor:
         
         # Load model
         print(f"Loading model from {model_path if model_path else 'dslim/bert-base-NER'}...")
-        self.model = BertForTokenClassification.from_pretrained(
+    
+        if model_path and os.path.exists(model_path):
+            config = BertForTokenClassification.from_pretrained(
+                'dslim/bert-base-NER'
+            ).config
+            config.num_labels = len(self.tag2idx)
+            config.id2label = self.idx2tag
+            config.label2id = self.tag2idx
+        
+            self.model = BertForTokenClassification(config)
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            print(f"Model loaded successfully from {model_path}")
+
+        else:
+            self.model = BertForTokenClassification.from_pretrained(
             'dslim/bert-base-NER' if model_path is None else 'bert-base-uncased',
             num_labels=len(self.tag2idx),
             id2label=self.idx2tag,
             label2id=self.tag2idx
         )
-        
-        # Load weights if model path is provided
-        if model_path and os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            print(f"Model loaded successfully from {model_path}")
-        else:
             print("No model path provided or file not found, using base model")
             
         self.model.to(self.device)
@@ -110,6 +117,7 @@ class ResumeNERPredictor:
     
     def pdf_to_text(self, pdf_path, preprocessing=False):
         """Convert PDF to text"""
+        print("masuk pdf to text")
         # Open pdf file
         doc = fitz.open(pdf_path)
 
@@ -302,44 +310,6 @@ class ResumeNERPredictor:
         Returns:
             dict: Dictionary with extracted entities
         """
+        print("masuk predict form pdf")
         text = self.pdf_to_text(pdf_path, preprocessing)
         return self.predict(text)
-
-
-# Example usage:
-if __name__ == "__main__":
-    # Initialize the predictor with a model path
-    predictor = ResumeNERPredictor(model_path="results/bert_ner_model.bin")
-    
-    # Example 1: Predict from text
-    sample_text = """
-    John Doe
-    Software Engineer
-    
-    Education
-    University of Technology, Bachelor of Computer Science, 2020
-    
-    Experience
-    ABC Technologies, Senior Developer, 2020-Present
-    XYZ Corp, Junior Developer, 2018-2020
-    
-    Skills
-    Python, Java, Machine Learning, Deep Learning, NLP
-    
-    Contact
-    email@example.com
-    San Francisco, CA
-    """
-    
-    results = predictor.predict(sample_text)
-    print("Extracted information:")
-    for entity_type, entities in results.items():
-        if entities:
-            print(f"{entity_type}: {', '.join(entities)}")
-    
-    # Example 2: Predict from PDF
-    # results_pdf = predictor.predict_from_pdf("path/to/resume.pdf")
-    # print("\nExtracted information from PDF:")
-    # for entity_type, entities in results_pdf.items():
-    #     if entities:
-    #         print(f"{entity_type}: {', '.join(entities)}")
