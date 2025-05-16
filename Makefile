@@ -4,5 +4,11 @@ generate-proto:
 main-run:
 	python -m src.main
 
+compose-up:
+	docker-compose up -d --build
+
+compose-down:
+	docker-compose down
+
 .PHONY:
 	generate-proto

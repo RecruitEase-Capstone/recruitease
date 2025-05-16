@@ -8,11 +8,13 @@ import proto.cv_processor_pb2_grpc as pb2_grpc
 from typing import Optional
 from minio import Minio
 from ml.tr import ResumeNERPredictor
+from db.pymongo import MongoConn
 
 class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
-    def __init__(self, minio_client, ner_model: ResumeNERPredictor):
+    def __init__(self, minio_client, ner_model: ResumeNERPredictor, mongo_conn:MongoConn):
         self.minio_client = minio_client
         self.ner_model = ner_model
+        self.mongo_conn = mongo_conn
 
     def ProcessBatchPDF(self, request, context):
         try:
@@ -71,6 +73,18 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
                         location=extracted.get("Location", ""),
                         email_address=extracted.get("Email Address", "")
                     )
+
+                    mongo_doc = {
+                        "batch_id": batch_id,
+                        "file_name": file_name,
+                        "prediction": extracted
+                    }
+                    try:
+                        self.mongo_conn.collection.insert_one(mongo_doc)
+                        print(f"Inserted prediction result of {file_name} into MongoDB.")
+                    except Exception as e:
+                        print(f"Failed to insert {file_name} into MongoDB: {e}")
+
                     
                     predictions.append(pb2.PredictionResult(
                         file_name=file_name,

@@ -8,6 +8,8 @@ from service.summarize_service import SummarizerService
 from src.helper.minio.minio import MinioClient
 from dotenv import load_dotenv
 from src.ml.tr import ResumeNERPredictor
+from src.db.pymongo import MongoConn
+from src.helper.config.db_config import load_config
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -28,10 +30,17 @@ def serve():
     )
 
     ner_model = ResumeNERPredictor(model_path=model_path)
+
+    db_config = load_config()
+
+    mongo_conn = MongoConn(db_config)
+    if not mongo_conn.connect_to_mongodb():
+        raise Exception("failed to connect to MongoDB")
     
     service = SummarizerService(
         minio_client=minio_client,
-        ner_model=ner_model
+        ner_model=ner_model,
+        mongo_conn=mongo_conn
     )
     
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
