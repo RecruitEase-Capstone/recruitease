@@ -2,7 +2,9 @@
 /.venv
 /checkpoints
 /model
-/src/ml/__pycache__
+myenv
+
+.env
 
 results/final_bert_ner_model.bin
 results/final_token_classifier_model.bin
@@ -13,3 +15,10 @@ results/model-state4.bin
 results/model-state5.bin
 
 extracted_data
+
+/src/ml/__pycache__
+/src/proto/__pycache__
+/src/service/__pycache__
+/src/helper/minio/__pycache__
+/src/helper/__pycache__
+/src/__pycache__
