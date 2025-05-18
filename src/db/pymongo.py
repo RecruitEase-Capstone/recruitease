@@ -33,6 +33,7 @@ class MongoConn:
             self.db = self.client[self.config['mongo']['database']]
             self.collection = self.db[self.config['mongo']['collection']]
             
+            print("success connect to mongo db")
             return True
         except Exception as e:
             print(f"MongoDB connection error: {e}")

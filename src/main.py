@@ -11,7 +11,7 @@ from src.ml.tr import ResumeNERPredictor
 from src.db.pymongo import MongoConn
 from src.helper.config.db_config import load_config
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
 app_port = os.getenv("APP_PORT")
@@ -23,26 +23,49 @@ minio_password = os.getenv("MINIO_ROOT_PASSWORD")
 model_path = "results/final_bert_ner_model.bin"
 
 def serve():
-    minio_client = MinioClient(
-        endpoint=f"{minio_host}:{minio_port}",
-        access_key=minio_user,
-        secret_key=minio_password
-    )
+    try: 
+        minio_client = MinioClient(
+            endpoint=f"{minio_host}:{minio_port}",
+            access_key=minio_user,
+            secret_key=minio_password
+        )
+    except Exception as e:
+        raise Exception(f"failed to initiate minio: {e}")
 
     ner_model = ResumeNERPredictor(model_path=model_path)
+    if ner_model is None:
+        logging.fatal("NER model is None!")
+        raise Exception("NER model is None!")
+    else:
+        logging.info("NER model instance created successfully.")
 
     db_config = load_config()
 
+    logging.info("Connecting to MongoDB...")
     mongo_conn = MongoConn(db_config)
     if not mongo_conn.connect_to_mongodb():
+        logging.fatal("Failed to connect to MongoDB!")
         raise Exception("failed to connect to MongoDB")
+    logging.info("Successfully connected to MongoDB.")
+
+    logging.info(f">> ner_model: {type(ner_model)}")
+    logging.info(f">> minio_client: {type(minio_client)}")
+    logging.info(f">> mongo_conn: {type(mongo_conn)}")
+
+    logging.info("initiating summarize service...")
+    try:
+        service = SummarizerService(
+            minio_client=minio_client,
+            ner_model=ner_model,
+            mongo_conn=mongo_conn
+        )
+    except Exception as e:
+        logging.fatal(f"error while initiate summarize service: {e}")
+        raise e 
     
-    service = SummarizerService(
-        minio_client=minio_client,
-        ner_model=ner_model,
-        mongo_conn=mongo_conn
-    )
-    
+    logging.info("success initiate summarize service")
+
+    logging.info("start initiaate grpc server")
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     pb2_grpc.add_CVProcessorServiceServicer_to_server(
         service, server
@@ -50,7 +73,7 @@ def serve():
 
     server.add_insecure_port(f'0.0.0.0:{app_port}')
     server.start()
-    print(f"ML service running on port {app_port}")
+    logging.info(f"ML service running on port {app_port}")
     server.wait_for_termination()
 
 if __name__ == '__main__':

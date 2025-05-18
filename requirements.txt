@@ -1,12 +1,9 @@
 PyMuPDF
 pandas
 torch
-argparse
 transformers
 tqdm
-argparse
 scikit-learn
-utils
 matplotlib
 numpy
 seqeval
@@ -16,3 +13,4 @@ minio
 tensorflow
 nltk
 pymongo
+python-dotenv

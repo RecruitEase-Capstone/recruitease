@@ -2,6 +2,7 @@ import os
 import tempfile
 import grpc
 import traceback
+import logging
 import proto.cv_processor_pb2 as pb2
 import proto.cv_processor_pb2_grpc as pb2_grpc
 
@@ -12,9 +13,15 @@ from db.pymongo import MongoConn
 
 class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
     def __init__(self, minio_client, ner_model: ResumeNERPredictor, mongo_conn:MongoConn):
+        logging.info(">> Initializing SummarizerService...")
         self.minio_client = minio_client
         self.ner_model = ner_model
         self.mongo_conn = mongo_conn
+
+        logging.info(">> SummarizerService initialized.")
+        logging.info(f">> ner_model is None: {self.ner_model is None}")
+        logging.info(f">> minio_client is None: {self.minio_client is None}")
+        logging.info(f">> mongo_conn is None: {self.mongo_conn is None}")
 
     def ProcessBatchPDF(self, request, context):
         try:

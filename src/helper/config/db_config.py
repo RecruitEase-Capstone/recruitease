@@ -8,7 +8,7 @@ def load_config():
     return {
         'mongo': {
             'host': os.getenv('MONGO_HOST'),
-            'port': os.getenv('MONGO_PORT'),
+            'port': os.getenv('MONGO_CONTAINER_PORT'),
             'database': str(os.getenv('MONGO_DB')),
             'collection': os.getenv('MONGO_COLLECTION'),
             'username': os.getenv('MONGO_USERNAME'),
