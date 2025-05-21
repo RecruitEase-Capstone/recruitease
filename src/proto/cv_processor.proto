@@ -6,12 +6,14 @@ import "google/protobuf/timestamp.proto";
 
 service CVProcessorService {
     rpc ProcessBatchPDF (BatchPDFProcessRequest) returns (BatchPDFProcessResponse);
+    rpc FetchSummarizedPdfHistory(FetchSummarizedPdfHistoryRequest) returns (BatchPDFProcessResponse);
 }
 
 message BatchPDFProcessRequest {
     string bucket_name = 1;
     string batch_id = 2;
-    repeated PDFFileInfo pdf_files = 3;
+    string user_id = 3;
+    repeated PDFFileInfo pdf_files = 4;
 }
 
 message PDFFileInfo {
@@ -42,4 +44,8 @@ message CVPrediction {
     repeated string skills = 8;
     repeated string location = 9;
     repeated string email_address = 10;
+}
+
+message FetchSummarizedPdfHistoryRequest {
+    string user_id = 1;
 }

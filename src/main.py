@@ -48,10 +48,6 @@ def serve():
         raise Exception("failed to connect to MongoDB")
     logging.info("Successfully connected to MongoDB.")
 
-    logging.info(f">> ner_model: {type(ner_model)}")
-    logging.info(f">> minio_client: {type(minio_client)}")
-    logging.info(f">> mongo_conn: {type(mongo_conn)}")
-
     logging.info("initiating summarize service...")
     try:
         service = SummarizerService(

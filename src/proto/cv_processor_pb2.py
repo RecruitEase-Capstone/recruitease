@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12\x63v_processor.proto\x12\x02v1\x1a\x1fgoogle/protobuf/timestamp.proto\"c\n\x16\x42\x61tchPDFProcessRequest\x12\x13\n\x0b\x62ucket_name\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\"\n\tpdf_files\x18\x03 \x03(\x0b\x32\x0f.v1.PDFFileInfo\"_\n\x0bPDFFileInfo\x12\x11\n\tfile_name\x18\x01 \x01(\t\x12\x0c\n\x04size\x18\x02 \x01(\x03\x12/\n\x0buploaded_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"k\n\x17\x42\x61tchPDFProcessResponse\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\t\x12\x13\n\x0btotal_files\x18\x02 \x01(\x05\x12)\n\x0bpredictions\x18\x03 \x03(\x0b\x32\x14.v1.PredictionResult\"K\n\x10PredictionResult\x12\x11\n\tfile_name\x18\x01 \x01(\t\x12$\n\nprediction\x18\x02 \x01(\x0b\x32\x10.v1.CVPrediction\"\xe3\x01\n\x0c\x43VPrediction\x12\x0c\n\x04name\x18\x01 \x03(\t\x12\x14\n\x0c\x63ollege_name\x18\x02 \x03(\t\x12\x0e\n\x06\x64\x65gree\x18\x03 \x03(\t\x12\x17\n\x0fgraduation_year\x18\x04 \x03(\t\x12\x1b\n\x13years_of_experience\x18\x05 \x03(\t\x12\x1b\n\x13\x63ompanies_worked_at\x18\x06 \x03(\t\x12\x13\n\x0b\x64\x65signation\x18\x07 \x03(\t\x12\x0e\n\x06skills\x18\x08 \x03(\t\x12\x10\n\x08location\x18\t \x03(\t\x12\x15\n\remail_address\x18\n \x03(\t2`\n\x12\x43VProcessorService\x12J\n\x0fProcessBatchPDF\x12\x1a.v1.BatchPDFProcessRequest\x1a\x1b.v1.BatchPDFProcessResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12\x63v_processor.proto\x12\x02v1\x1a\x1fgoogle/protobuf/timestamp.proto\"t\n\x16\x42\x61tchPDFProcessRequest\x12\x13\n\x0b\x62ucket_name\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x0f\n\x07user_id\x18\x03 \x01(\t\x12\"\n\tpdf_files\x18\x04 \x03(\x0b\x32\x0f.v1.PDFFileInfo\"_\n\x0bPDFFileInfo\x12\x11\n\tfile_name\x18\x01 \x01(\t\x12\x0c\n\x04size\x18\x02 \x01(\x03\x12/\n\x0buploaded_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"k\n\x17\x42\x61tchPDFProcessResponse\x12\x10\n\x08\x62\x61tch_id\x18\x01 \x01(\t\x12\x13\n\x0btotal_files\x18\x02 \x01(\x05\x12)\n\x0bpredictions\x18\x03 \x03(\x0b\x32\x14.v1.PredictionResult\"K\n\x10PredictionResult\x12\x11\n\tfile_name\x18\x01 \x01(\t\x12$\n\nprediction\x18\x02 \x01(\x0b\x32\x10.v1.CVPrediction\"\xe3\x01\n\x0c\x43VPrediction\x12\x0c\n\x04name\x18\x01 \x03(\t\x12\x14\n\x0c\x63ollege_name\x18\x02 \x03(\t\x12\x0e\n\x06\x64\x65gree\x18\x03 \x03(\t\x12\x17\n\x0fgraduation_year\x18\x04 \x03(\t\x12\x1b\n\x13years_of_experience\x18\x05 \x03(\t\x12\x1b\n\x13\x63ompanies_worked_at\x18\x06 \x03(\t\x12\x13\n\x0b\x64\x65signation\x18\x07 \x03(\t\x12\x0e\n\x06skills\x18\x08 \x03(\t\x12\x10\n\x08location\x18\t \x03(\t\x12\x15\n\remail_address\x18\n \x03(\t\"3\n FetchSummarizedPdfHistoryRequest\x12\x0f\n\x07user_id\x18\x01 \x01(\t2\xc0\x01\n\x12\x43VProcessorService\x12J\n\x0fProcessBatchPDF\x12\x1a.v1.BatchPDFProcessRequest\x1a\x1b.v1.BatchPDFProcessResponse\x12^\n\x19\x46\x65tchSummarizedPdfHistory\x12$.v1.FetchSummarizedPdfHistoryRequest\x1a\x1b.v1.BatchPDFProcessResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,15 +33,17 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'cv_processor_pb2', _globals
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_BATCHPDFPROCESSREQUEST']._serialized_start=59
-  _globals['_BATCHPDFPROCESSREQUEST']._serialized_end=158
-  _globals['_PDFFILEINFO']._serialized_start=160
-  _globals['_PDFFILEINFO']._serialized_end=255
-  _globals['_BATCHPDFPROCESSRESPONSE']._serialized_start=257
-  _globals['_BATCHPDFPROCESSRESPONSE']._serialized_end=364
-  _globals['_PREDICTIONRESULT']._serialized_start=366
-  _globals['_PREDICTIONRESULT']._serialized_end=441
-  _globals['_CVPREDICTION']._serialized_start=444
-  _globals['_CVPREDICTION']._serialized_end=671
-  _globals['_CVPROCESSORSERVICE']._serialized_start=673
-  _globals['_CVPROCESSORSERVICE']._serialized_end=769
+  _globals['_BATCHPDFPROCESSREQUEST']._serialized_end=175
+  _globals['_PDFFILEINFO']._serialized_start=177
+  _globals['_PDFFILEINFO']._serialized_end=272
+  _globals['_BATCHPDFPROCESSRESPONSE']._serialized_start=274
+  _globals['_BATCHPDFPROCESSRESPONSE']._serialized_end=381
+  _globals['_PREDICTIONRESULT']._serialized_start=383
+  _globals['_PREDICTIONRESULT']._serialized_end=458
+  _globals['_CVPREDICTION']._serialized_start=461
+  _globals['_CVPREDICTION']._serialized_end=688
+  _globals['_FETCHSUMMARIZEDPDFHISTORYREQUEST']._serialized_start=690
+  _globals['_FETCHSUMMARIZEDPDFHISTORYREQUEST']._serialized_end=741
+  _globals['_CVPROCESSORSERVICE']._serialized_start=744
+  _globals['_CVPROCESSORSERVICE']._serialized_end=936
 # @@protoc_insertion_point(module_scope)

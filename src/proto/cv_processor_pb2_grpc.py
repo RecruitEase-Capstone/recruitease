@@ -39,6 +39,11 @@ class CVProcessorServiceStub(object):
                 request_serializer=cv__processor__pb2.BatchPDFProcessRequest.SerializeToString,
                 response_deserializer=cv__processor__pb2.BatchPDFProcessResponse.FromString,
                 _registered_method=True)
+        self.FetchSummarizedPdfHistory = channel.unary_unary(
+                '/v1.CVProcessorService/FetchSummarizedPdfHistory',
+                request_serializer=cv__processor__pb2.FetchSummarizedPdfHistoryRequest.SerializeToString,
+                response_deserializer=cv__processor__pb2.BatchPDFProcessResponse.FromString,
+                _registered_method=True)
 
 
 class CVProcessorServiceServicer(object):
@@ -50,12 +55,23 @@ class CVProcessorServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def FetchSummarizedPdfHistory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_CVProcessorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'ProcessBatchPDF': grpc.unary_unary_rpc_method_handler(
                     servicer.ProcessBatchPDF,
                     request_deserializer=cv__processor__pb2.BatchPDFProcessRequest.FromString,
+                    response_serializer=cv__processor__pb2.BatchPDFProcessResponse.SerializeToString,
+            ),
+            'FetchSummarizedPdfHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.FetchSummarizedPdfHistory,
+                    request_deserializer=cv__processor__pb2.FetchSummarizedPdfHistoryRequest.FromString,
                     response_serializer=cv__processor__pb2.BatchPDFProcessResponse.SerializeToString,
             ),
     }
@@ -85,6 +101,33 @@ class CVProcessorService(object):
             target,
             '/v1.CVProcessorService/ProcessBatchPDF',
             cv__processor__pb2.BatchPDFProcessRequest.SerializeToString,
+            cv__processor__pb2.BatchPDFProcessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FetchSummarizedPdfHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/v1.CVProcessorService/FetchSummarizedPdfHistory',
+            cv__processor__pb2.FetchSummarizedPdfHistoryRequest.SerializeToString,
             cv__processor__pb2.BatchPDFProcessResponse.FromString,
             options,
             channel_credentials,

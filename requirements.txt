@@ -13,4 +13,5 @@ minio
 tensorflow
 nltk
 pymongo
+bson
 python-dotenv

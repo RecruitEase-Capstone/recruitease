@@ -7,14 +7,16 @@ from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Map
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class BatchPDFProcessRequest(_message.Message):
-    __slots__ = ("bucket_name", "batch_id", "pdf_files")
+    __slots__ = ("bucket_name", "batch_id", "user_id", "pdf_files")
     BUCKET_NAME_FIELD_NUMBER: _ClassVar[int]
     BATCH_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
     PDF_FILES_FIELD_NUMBER: _ClassVar[int]
     bucket_name: str
     batch_id: str
+    user_id: str
     pdf_files: _containers.RepeatedCompositeFieldContainer[PDFFileInfo]
-    def __init__(self, bucket_name: _Optional[str] = ..., batch_id: _Optional[str] = ..., pdf_files: _Optional[_Iterable[_Union[PDFFileInfo, _Mapping]]] = ...) -> None: ...
+    def __init__(self, bucket_name: _Optional[str] = ..., batch_id: _Optional[str] = ..., user_id: _Optional[str] = ..., pdf_files: _Optional[_Iterable[_Union[PDFFileInfo, _Mapping]]] = ...) -> None: ...
 
 class PDFFileInfo(_message.Message):
     __slots__ = ("file_name", "size", "uploaded_at")
@@ -67,3 +69,9 @@ class CVPrediction(_message.Message):
     location: _containers.RepeatedScalarFieldContainer[str]
     email_address: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, name: _Optional[_Iterable[str]] = ..., college_name: _Optional[_Iterable[str]] = ..., degree: _Optional[_Iterable[str]] = ..., graduation_year: _Optional[_Iterable[str]] = ..., years_of_experience: _Optional[_Iterable[str]] = ..., companies_worked_at: _Optional[_Iterable[str]] = ..., designation: _Optional[_Iterable[str]] = ..., skills: _Optional[_Iterable[str]] = ..., location: _Optional[_Iterable[str]] = ..., email_address: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class FetchSummarizedPdfHistoryRequest(_message.Message):
+    __slots__ = ("user_id",)
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    user_id: str
+    def __init__(self, user_id: _Optional[str] = ...) -> None: ...
