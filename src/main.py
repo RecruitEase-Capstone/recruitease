@@ -20,7 +20,7 @@ minio_host = os.getenv("MINIO_API_HOST")
 minio_user = os.getenv("MINIO_ROOT_USER")
 minio_password = os.getenv("MINIO_ROOT_PASSWORD")
 
-model_path = "results/final_bert_ner_model.bin"
+model_path = "results/model-state.bin"
 
 def serve():
     try: 

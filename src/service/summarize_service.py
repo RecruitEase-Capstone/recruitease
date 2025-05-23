@@ -65,7 +65,7 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
                         context.abort(
                             grpc.StatusCode.INTERNAL,
                             f"Failed to process file {file_name}: {str(e)}"
-                        )
+                        ) 
                     
                     pred = pb2.CVPrediction(
                         name=extracted.get("Name", ""),
@@ -84,7 +84,7 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
                         "batch_id": batch_id,
                         "file_name": file_name,
                         "user_id": user_id,
-                        "prediction": extracted
+                        "prediction": pred
                     }
                     try:
                         self.mongo_conn.collection.insert_one(mongo_doc)

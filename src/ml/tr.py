@@ -1,214 +1,259 @@
 import torch
 import numpy as np
-import fitz 
+import json
+import argparse
+import re
+import fitz
 import os
-from transformers import AutoTokenizer, BertForTokenClassification
+from transformers import BertForTokenClassification, BertTokenizerFast, AutoTokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from scipy.special import softmax
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords, wordnet
-from nltk import pos_tag
-from nltk.stem import WordNetLemmatizer
 
 class ResumeNERPredictor:
     """
     A class to extract named entities from resume text using a BERT-based NER model.
     """
     
-    def __init__(self, model_path=None, max_len=512):
+    def __init__(self, model_path=None, max_len=512, overlap=100):
         """
         Initialize the ResumeNERPredictor with a pre-trained model.
         
         Args:
             model_path (str): Path to the saved model file (.bin)
             max_len (int): Maximum sequence length for BERT input
+            overlap (int): Number of tokens to overlap between chunks
         """
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.max_len = max_len
+        self.overlap = overlap
         
-        # Define entity mapping
+        # Define entity mapping - sesuai dengan format output yang diinginkan
         self.entity_dict = {
-            'NAME': 'Name',
-            'CLG': 'College Name',
-            'DEG': 'Degree',
-            'GRADYEAR': 'Graduation Year',
-            'YOE': 'Years of Experience',
-            'COMPANY': 'Companies worked at',
-            'DESIG': 'Designation',
-            'SKILLS': 'Skills',
-            'LOC': 'Location',
-            'EMAIL': 'Email Address'
+            'Name': 'Name',
+            'Degree': 'Degree', 
+            'Skills': 'Skills',
+            'College Name': 'College Name',
+            'Email Address': 'Email Address',
+            'Designation': 'Designation',
+            'Companies worked at': 'Companies worked at',
+            'Graduation Year': 'Graduation Year',
+            'Years of Experience': 'Years of Experience',
+            'Location': 'Location'
         }
+        
+        # Define tags - sesuai dengan kode asli
+        self.tags_vals = ["UNKNOWN", "O", "Name", "Degree", "Skills", "College Name", "Email Address",
+                         "Designation", "Companies worked at", "Graduation Year", "Years of Experience", "Location"]
+        
+        self.tag2idx = {t: i for i, t in enumerate(self.tags_vals)}
+        self.idx2tag = {i: t for i, t in enumerate(self.tags_vals)}
+        
+        # Label yang tidak perlu ditampilkan
+        self.restricted_labels = ['O', 'UNKNOWN']
         
         # Load tokenizer
         print("Loading tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained('dslim/bert-base-NER', do_lower_case=True)
-        
-        # Define tags
-        tag_vals = set(['X', '[CLS]', '[SEP]', 'O', 
-                       'B-NAME', 'I-NAME', 'L-NAME',
-                       'B-CLG', 'I-CLG', 'L-CLG', 'U-CLG',
-                       'B-DEG', 'I-DEG', 'L-DEG', 'U-DEG',
-                       'B-GRADYEAR', 'I-GRADYEAR', 'L-GRADYEAR', 'U-GRADYEAR',
-                       'B-YOE', 'I-YOE', 'L-YOE', 'U-YOE',
-                       'B-COMPANY', 'I-COMPANY', 'L-COMPANY', 'U-COMPANY',
-                       'B-DESIG', 'I-DESIG', 'L-DESIG', 'U-DESIG',
-                       'B-SKILLS', 'I-SKILLS', 'L-SKILLS', 'U-SKILLS',
-                       'B-LOC', 'I-LOC', 'L-LOC', 'U-LOC',
-                       'B-EMAIL', 'I-EMAIL', 'L-EMAIL', 'U-EMAIL'])
-        
-        self.tag2idx = {t: i for i, t in enumerate(tag_vals)}
-        self.idx2tag = {i: t for t, i in self.tag2idx.items()}
+        try:
+            self.tokenizer = BertTokenizerFast('./vocab/vocab.txt', lowercase=True)
+        except:
+            print("Could not load custom vocab, using default tokenizer")
+            self.tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
         
         # Load model
-        print(f"Loading model from {model_path if model_path else 'dslim/bert-base-NER'}...")
-    
-        if model_path and os.path.exists(model_path):
-            config = BertForTokenClassification.from_pretrained(
-                'dslim/bert-base-NER'
-            ).config
-            config.num_labels = len(self.tag2idx)
-            config.id2label = self.idx2tag
-            config.label2id = self.tag2idx
+        print(f"Loading model from {model_path if model_path else 'bert-base-uncased'}...")
         
-            self.model = BertForTokenClassification(config)
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        if model_path and os.path.exists(model_path):
+            self.model = BertForTokenClassification.from_pretrained(
+                'bert-base-uncased', 
+                num_labels=len(self.tag2idx)
+            )
+            
+            # Load state dict
+            checkpoint = torch.load(model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
             print(f"Model loaded successfully from {model_path}")
-
         else:
             self.model = BertForTokenClassification.from_pretrained(
-            'dslim/bert-base-NER' if model_path is None else 'bert-base-uncased',
-            num_labels=len(self.tag2idx),
-            id2label=self.idx2tag,
-            label2id=self.tag2idx
-        )
+                'bert-base-uncased',
+                num_labels=len(self.tag2idx)
+            )
             print("No model path provided or file not found, using base model")
             
         self.model.to(self.device)
         self.model.eval()
-        
-    def get_wordnet_pos(self, word):
-        """Get wordnet POS tag from word"""
-        tag = pos_tag([word])[0][1][0].upper()
-        tag_dict = {
-            "J": wordnet.ADJ,
-            "N": wordnet.NOUN,
-            "V": wordnet.VERB,
-            "R": wordnet.ADV
-        }
-        return tag_dict.get(tag, wordnet.NOUN)
     
-    def preprocess_text(self, text):
-        """Preprocess text with tokenization, stopword removal and lemmatization"""
-        # Tokenization
-        tokenized_text = word_tokenize(text)
-
-        # Remove stopwords
-        stop_words = set(stopwords.words('english'))
-        filtered_text = []
-        for token in tokenized_text:
-            if token not in stop_words:
-                filtered_text.append(token)
-
-        # POS and lemmatize
-        lemmatizer = WordNetLemmatizer()
-        lemmatized_results = [lemmatizer.lemmatize(token, self.get_wordnet_pos(token)) for token in filtered_text]
-        return ' '.join(lemmatized_results)
-    
-    def pdf_to_text(self, pdf_path, preprocessing=False):
+    def pdf_to_text(self, pdf_path):
         """Convert PDF to text"""
-        print("masuk pdf to text")
-        # Open pdf file
+        print("Processing PDF to extract text...")
         doc = fitz.open(pdf_path)
-
-        # Convert pdf to text
+        
         text = ''
         for page in doc:
             text += page.get_text()
-
-        # Remove new line
+        
+        # Remove new line dan normalize whitespace
         text = ' '.join(text.split('\n'))
-
-        if preprocessing:
-            return self.preprocess_text(text)
-        else:
-            return text
-    
-    def reconstruct_entity_text(self, tokens):
-        """Reconstruct entity text from tokens, handling BERT's subword tokenization"""
-        text = ""
-        for token in tokens:
-            if token.startswith('##'):
-                text += token[2:]
-            elif token.startswith('#'):
-                text += token[1:]
-            else:
-                if text:
-                    text += ' ' + token
-                else:
-                    text += token
+        text = re.sub(r'\s+', ' ', text.strip())
+        
         return text
+    
+    def split_text_by_sentences(self, text, max_sentence_length=400):
+        """
+        Membagi teks berdasarkan tanda titik (.) dengan mempertimbangkan panjang maksimal
+        """
+        # Split berdasarkan titik, tapi pertahankan titik
+        sentences = re.split(r'(\. |\.$)', text)
+        
+        # Gabungkan kembali dengan titik
+        processed_sentences = []
+        current_sentence = ""
+        
+        for i, part in enumerate(sentences):
+            if part in ['. ', '.$']:
+                current_sentence += part
+                if len(current_sentence.strip()) > 0:
+                    processed_sentences.append(current_sentence.strip())
+                    current_sentence = ""
+            else:
+                current_sentence += part
+        
+        # Tambahkan sisa teks jika ada
+        if current_sentence.strip():
+            processed_sentences.append(current_sentence.strip())
+        
+        # Jika masih ada kalimat yang terlalu panjang, split berdasarkan newline atau koma
+        final_sentences = []
+        for sentence in processed_sentences:
+            if len(sentence) <= max_sentence_length:
+                final_sentences.append(sentence)
+            else:
+                # Split berdasarkan newline atau koma jika terlalu panjang
+                sub_parts = re.split(r'(\n|, )', sentence)
+                current_part = ""
+                
+                for sub_part in sub_parts:
+                    if len(current_part + sub_part) <= max_sentence_length:
+                        current_part += sub_part
+                    else:
+                        if current_part.strip():
+                            final_sentences.append(current_part.strip())
+                        current_part = sub_part
+                
+                if current_part.strip():
+                    final_sentences.append(current_part.strip())
+        
+        return [s for s in final_sentences if len(s.strip()) > 0]
+    
+    def tokenize_resume(self, resume_text):
+        """
+        Tokenize resume text menggunakan BERT tokenizer
+        """
+        encoding = self.tokenizer(
+            resume_text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_len,
+            return_tensors='pt',
+            return_offsets_mapping=True
+        )
+        
+        return {
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
+            'offset_mapping': encoding['offset_mapping'].squeeze()
+        }
+    
+    def predict_single_sentence(self, sentence_text):
+        """
+        Prediksi entitas dari satu kalimat
+        """
+        data = self.tokenize_resume(sentence_text)
+        
+        # Prepare input untuk model
+        input_ids = data['input_ids'].unsqueeze(0)
+        input_mask = data['attention_mask'].unsqueeze(0)
+        
+        # Move ke device
+        input_ids = input_ids.to(self.device)
+        input_mask = input_mask.to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids,
+                token_type_ids=None,
+                attention_mask=input_mask,
+            )
+            logits = outputs.logits
+        
+        # Convert ke numpy dan dapatkan prediksi
+        logits = logits.cpu().detach().numpy()
+        label_ids = np.argmax(logits, axis=2)
+        
+        entities = []
+        for label_id, offset in zip(label_ids[0], data['offset_mapping']):
+            curr_id = self.idx2tag[label_id]
+            curr_start = offset[0].item()
+            curr_end = offset[1].item()
+            
+            # Skip restricted labels dan token [CLS], [SEP], [PAD]
+            if curr_id not in self.restricted_labels and curr_start != curr_end:
+                # Merge entitas yang bersebelahan dengan label yang sama
+                if (len(entities) > 0 and 
+                    entities[-1]['entity'] == curr_id and 
+                    curr_start - entities[-1]['end'] in [0, 1]):
+                    entities[-1]['end'] = curr_end
+                else:
+                    entities.append({
+                        'entity': curr_id, 
+                        'start': curr_start, 
+                        'end': curr_end
+                    })
+        
+        # Tambahkan teks untuk setiap entitas
+        for ent in entities:
+            ent['text'] = sentence_text[ent['start']:ent['end']].strip()
+        
+        return entities
+    
+    def merge_adjacent_entities(self, entities):
+        """
+        Merge entitas yang bersebelahan dengan label yang sama
+        """
+        if not entities:
+            return entities
+        
+        # Sort berdasarkan posisi start
+        entities.sort(key=lambda x: x['start'])
+        
+        merged = []
+        current_entity = entities[0].copy()
+        
+        for entity in entities[1:]:
+            # Jika entitas sama dan posisinya bersebelahan atau overlapping
+            if (current_entity['entity'] == entity['entity'] and 
+                entity['start'] <= current_entity['end'] + 5):  # tolerance 5 karakter
+                # Extend current entity
+                current_entity['end'] = max(current_entity['end'], entity['end'])
+                current_entity['text'] = current_entity['text'] + " " + entity['text']
+                current_entity['text'] = current_entity['text'].strip()
+            else:
+                merged.append(current_entity)
+                current_entity = entity.copy()
+        
+        merged.append(current_entity)
+        return merged
     
     def predict(self, text):
         """
-        Extract named entities from input text
+        Extract named entities from input text by processing it in chunks
         
         Args:
             text (str): Resume text content
             
         Returns:
-            dict: Dictionary with extracted entities
+            dict: Dictionary with extracted entities (format sesuai kode referensi)
         """
-        # Tokenization
-        tokenized_texts = []
-        temp_token = []
-
-        # Add [CLS] at the front
-        temp_token.append('[CLS]')
-        token_list = self.tokenizer.tokenize(text)
-        
-        for m, token in enumerate(token_list):
-            temp_token.append(token)
-
-        # Trim the token to fit the length requirement
-        if len(temp_token) > self.max_len - 1:
-            temp_token = temp_token[:self.max_len - 1]
-
-        # Add [SEP] at the end
-        temp_token.append('[SEP]')  
-
-        tokenized_texts.append(temp_token)
-
-        # Make id embedding  
-        input_ids = pad_sequences([self.tokenizer.convert_tokens_to_ids(txt) for txt in tokenized_texts],
-                            maxlen=self.max_len, dtype='long', truncating='post', padding='post')
-        
-        # Make mask embedding
-        attention_masks = [[float(i > 0) for i in ii] for ii in input_ids]
-        
-        # Convert to tensors
-        input_ids = torch.tensor(input_ids)
-        attention_masks = torch.tensor(attention_masks)
-        
-        # Move tensors to device
-        input_ids = input_ids.to(self.device)
-        attention_masks = attention_masks.to(self.device)
-        
-        # Predict
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=input_ids,
-                token_type_ids=None,
-                attention_mask=attention_masks,
-            )
-            logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
-
-        # Process predictions
-        predict_results = logits.detach().cpu().numpy()
-        results_arrays_soft = softmax(predict_results)  # Apply softmax
-        result_list = np.argmax(results_arrays_soft, axis=-1)
-
-        # Initialize result dictionary
+        # Initialize result dictionary sesuai format yang diinginkan
         result_json = {
             'Name': [],
             'College Name': [],
@@ -222,94 +267,71 @@ class ResumeNERPredictor:
             'Email Address': []
         }
         
-        # Create a list to store token-tag pairs
-        token_tag_pairs = []
+        print("Splitting resume into sentences...")
+        sentences = self.split_text_by_sentences(text, max_sentence_length=self.max_len-100)
+        print(f"Resume split into {len(sentences)} parts")
         
-        # Extract valid tokens and their tags
-        for i in range(len(temp_token)):
-            if i < len(attention_masks[0]) and attention_masks[0][i] > 0:
-                token = temp_token[i]
-                tag = self.idx2tag[result_list[0][i]]
-                token_tag_pairs.append((token, tag))
+        all_entities = []
+        current_position = 0
         
-        # Process token-tag pairs to reconstruct entities
-        current_entity_type = None
-        current_entity_tokens = []
+        for i, sentence in enumerate(sentences):
+            print(f"Processing part {i+1}/{len(sentences)}: {sentence[:50]}...")
+            
+            # Prediksi untuk kalimat ini
+            sentence_entities = self.predict_single_sentence(sentence)
+            
+            # Adjust posisi entitas ke posisi absolut dalam teks asli
+            sentence_start_in_original = text.find(sentence, current_position)
+            if sentence_start_in_original == -1:
+                sentence_start_in_original = current_position
+            
+            for entity in sentence_entities:
+                adjusted_entity = entity.copy()
+                adjusted_entity['start'] = entity['start'] + sentence_start_in_original
+                adjusted_entity['end'] = entity['end'] + sentence_start_in_original
+                adjusted_entity['text'] = text[adjusted_entity['start']:adjusted_entity['end']].strip()
+                all_entities.append(adjusted_entity)
+            
+            # Update posisi untuk kalimat berikutnya
+            current_position = sentence_start_in_original + len(sentence)
         
-        for i, (token, tag) in enumerate(token_tag_pairs):
-            # Skip special tokens
-            if token in ['[CLS]', '[SEP]']:
-                continue
-                
-            # Process tags
-            if tag.startswith('B-'):  # Beginning of a multi-token entity
-                # If we were building an entity, save it
-                if current_entity_type and current_entity_tokens:
-                    entity_text = self.reconstruct_entity_text(current_entity_tokens)
-                    if current_entity_type in self.entity_dict:
-                        result_json[self.entity_dict[current_entity_type]].append(entity_text)
-                
-                # Start new entity
-                current_entity_type = tag[2:]
-                current_entity_tokens = [token]
-                
-            elif tag.startswith('I-'):  # Inside of a multi-token entity
-                if current_entity_type == tag[2:]:
-                    current_entity_tokens.append(token)
-                    
-            elif tag.startswith('L-'):  # Last token of a multi-token entity
-                if current_entity_type == tag[2:]:
-                    current_entity_tokens.append(token)
-                    # Save the completed entity
-                    entity_text = self.reconstruct_entity_text(current_entity_tokens)
-                    if current_entity_type in self.entity_dict:
-                        result_json[self.entity_dict[current_entity_type]].append(entity_text)
-                    # Reset for next entity
-                    current_entity_type = None
-                    current_entity_tokens = []
-                    
-            elif tag.startswith('U-'):  # Unit/single token entity
-                entity_type = tag[2:]
-                entity_text = token.replace('##', '')
-                if entity_type in self.entity_dict:
-                    result_json[self.entity_dict[entity_type]].append(entity_text)
-                    
-            elif tag == 'X':  # Subword token
-                if current_entity_tokens:
-                    current_entity_tokens.append(token)
+        # Merge entitas yang bersebelahan dengan label yang sama
+        merged_entities = self.merge_adjacent_entities(all_entities)
         
-        # In case the last entity wasn't closed with an L- tag
-        if current_entity_type and current_entity_tokens:
-            entity_text = self.reconstruct_entity_text(current_entity_tokens)
-            if current_entity_type in self.entity_dict:
-                result_json[self.entity_dict[current_entity_type]].append(entity_text)
+        # Konversi ke format output yang diinginkan
+        for entity in merged_entities:
+            entity_type = entity['entity']
+            entity_text = entity['text']
+            
+            if entity_type in result_json and entity_text:
+                # Remove duplicates
+                if entity_text not in result_json[entity_type]:
+                    result_json[entity_type].append(entity_text)
         
-        # Post-process the entities to clean them up
+        # Post-process untuk membersihkan entitas
         for key in result_json:
-            # Remove duplicates while preserving order
-            unique_entities = []
+            # Remove empty strings dan duplicates
+            cleaned_entities = []
             seen = set()
             for entity in result_json[key]:
-                # Clean up entity text
                 cleaned_entity = entity.strip()
                 if cleaned_entity and cleaned_entity not in seen:
                     seen.add(cleaned_entity)
-                    unique_entities.append(cleaned_entity)
-            result_json[key] = unique_entities
+                    cleaned_entities.append(cleaned_entity)
+            result_json[key] = cleaned_entities
         
         return result_json
     
-    def predict_from_pdf(self, pdf_path, preprocessing=False):
+    def predict_from_pdf(self, pdf_path):
         """
         Extract named entities from a PDF file
         
         Args:
             pdf_path (str): Path to PDF file
-            preprocessing (bool): Whether to apply text preprocessing
             
         Returns:
             dict: Dictionary with extracted entities
         """
-        print("masuk predict form pdf")
-        text = self.pdf_to_text(pdf_path, preprocessing)
+        print(f"Extracting information from PDF: {pdf_path}")
+        text = self.pdf_to_text(pdf_path)
         return self.predict(text)
