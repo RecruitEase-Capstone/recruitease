@@ -2,7 +2,7 @@
 set -e
 
 echo -e "\n==> Waiting for MongoDB to be ready...\n"
-until mongosh --quiet --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
+until mongo --quiet --eval "db.adminCommand('ping')" > /dev/null 2>&1; do
   echo "==> MongoDB is not ready yet... waiting 1 second"
   sleep 1
 done
@@ -16,7 +16,7 @@ DB_PASS=${MONGO_PASSWORD}
 echo -e "\n==> Creating database: $DB_NAME\n"
 echo -e "\n==> With username: $DB_USER\n"
 
-mongosh admin --quiet --eval "
+mongo admin --quiet --eval "
   db = db.getSiblingDB('$DB_NAME');
   
   if (!db.getUser('$DB_USER')) {

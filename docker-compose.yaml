@@ -1,6 +1,6 @@
 services:
   ml_service_mongo:
-    image: mongo
+    image: mongo:4.4.6
     container_name: ml-service-mongodb
     restart: always
     volumes:
@@ -19,7 +19,7 @@ services:
     networks:
       - internal
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/?authSource=admin --quiet
+      test: echo 'db.runCommand("ping").ok' | mongo localhost:27017/?authSource=admin --quiet
       interval: 30s
       timeout: 10s
       retries: 5
