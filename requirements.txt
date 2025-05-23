@@ -10,7 +10,6 @@ seqeval
 grpcio
 grpcio-tools
 minio
-tensorflow
 nltk
 pymongo
 bson
