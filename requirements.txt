@@ -1,7 +1,7 @@
 PyMuPDF
 pandas
 torch
-transformers<=4.38.2
+transformers
 tqdm
 scikit-learn
 matplotlib
