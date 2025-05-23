@@ -12,5 +12,4 @@ grpcio-tools
 minio
 nltk
 pymongo
-bson
 python-dotenv
