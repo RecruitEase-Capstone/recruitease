@@ -6,7 +6,6 @@ import re
 import fitz
 import os
 from transformers import BertForTokenClassification, BertTokenizerFast, AutoTokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 from scipy.special import softmax
 
 class ResumeNERPredictor:
