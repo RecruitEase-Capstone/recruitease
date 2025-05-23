@@ -7,6 +7,7 @@ import proto.cv_processor_pb2 as pb2
 import proto.cv_processor_pb2_grpc as pb2_grpc
 
 from bson import ObjectId
+from google.protobuf.json_format import MessageToDict, ParseDict
 from typing import Optional
 from minio import Minio
 from ml.tr import ResumeNERPredictor
@@ -25,8 +26,6 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
             batch_id = request.batch_id
             bucket = request.bucket_name
             user_id = request.user_id
-
-            logging.info(f"user id : {user_id}")
             
             # Validate request parameters
             if not batch_id:
@@ -84,7 +83,7 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
                         "batch_id": batch_id,
                         "file_name": file_name,
                         "user_id": user_id,
-                        "prediction": pred
+                        "prediction": MessageToDict(pred)
                     }
                     try:
                         self.mongo_conn.collection.insert_one(mongo_doc)
@@ -92,7 +91,6 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
                     except Exception as e:
                         print(f"Failed to insert {file_name} into MongoDB: {e}")
 
-                    
                     predictions.append(pb2.PredictionResult(
                         file_name=file_name,
                         prediction=pred
@@ -125,56 +123,35 @@ class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
             context.abort(self._map_exception_to_grpc_code(e), f"Service error: {str(e)}")
 
     def FetchSummarizedPdfHistory(self, request, context):
+        print(">> start fetching summarized pdf history...")
         user_id = request.user_id
 
         try:
-            # Ambil semua dokumen milik user
             results = self.mongo_conn.collection.find({"user_id": user_id})
-
             predictions = []
             batch_id = None
-            total_files = 0
 
             for doc in results:
-                logging.info(f"doc : {doc}")
                 prediction_data = doc.get("prediction", {})
+                cv_prediction = ParseDict(prediction_data, pb2.CVPrediction())
 
-                # Buat CVPrediction (perhatikan pemetaan key yang berbeda casing/spasi)
-                cv_prediction = pb2.CVPrediction(
-                    name=prediction_data.get("Name", []),
-                    college_name=prediction_data.get("College Name", []),
-                    degree=prediction_data.get("Degree", []),
-                    graduation_year=prediction_data.get("Graduation Year", []),
-                    years_of_experience=prediction_data.get("Years of Experience", []),
-                    companies_worked_at=prediction_data.get("Companies worked at", []),
-                    designation=prediction_data.get("Designation", []),
-                    skills=prediction_data.get("Skills", []),
-                    location=prediction_data.get("Location", []),
-                    email_address=prediction_data.get("Email Address", []),
-                )
-
-                # Buat PredictionResult
-                prediction_result = pb2.PredictionResult(
+                predictions.append(pb2.PredictionResult(
                     file_name=doc.get("file_name", ""),
                     prediction=cv_prediction
-                )
+                ))
 
-                predictions.append(prediction_result)
-                batch_id = doc.get("batch_id", batch_id)  # Ambil salah satu batch_id
-                total_files += 1
+                batch_id = doc.get("batch_id", batch_id)
 
-            response = pb2.BatchPDFProcessResponse(
-                batch_id=batch_id or "", 
-                total_files=total_files,
+            return pb2.BatchPDFProcessResponse(
+                batch_id=batch_id or "",
+                total_files=len(predictions),
                 predictions=predictions
             )
-
-            return response
 
         except Exception as e:
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
-            return pb2.BatchPDFProcessResponse()    
+            return pb2.BatchPDFProcessResponse()
 
 
     def _map_exception_to_grpc_code(self, exception: Exception) -> grpc.StatusCode:
