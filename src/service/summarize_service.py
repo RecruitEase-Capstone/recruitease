@@ -10,7 +10,7 @@ from bson import ObjectId
 from google.protobuf.json_format import MessageToDict, ParseDict
 from typing import Optional
 from minio import Minio
-from ml.tr import ResumeNERPredictor
+from ml.predict import ResumeNERPredictor
 from db.pymongo import MongoConn
 
 class SummarizerService(pb2_grpc.CVProcessorServiceServicer):
