@@ -96,11 +96,18 @@ idx2tag = {i: t for i, t in enumerate(tags_vals)}
 
 
 def process_resume(data, tokenizer, tag2idx, max_len, is_test=False):
+    # PERUBAHAN: Tambahkan truncation=True dan padding='max_length'
     tok = tokenizer.encode_plus(
-        data[0], max_length=max_len, return_offsets_mapping=True)
+        data[0], 
+        max_length=max_len, 
+        truncation=True,          # ← TAMBAHKAN INI
+        padding='max_length',     # ← TAMBAHKAN INI 
+        return_offsets_mapping=True
+    )
     curr_sent = {'orig_labels': [], 'labels': []}
 
-    padding_length = max_len - len(tok['input_ids'])
+    # HAPUS manual padding karena sudah ada padding='max_length'
+    # padding_length = max_len - len(tok['input_ids'])  # ← HAPUS BARIS INI
 
     if not is_test:
         labels = data[1]['entities']
@@ -109,14 +116,21 @@ def process_resume(data, tokenizer, tag2idx, max_len, is_test=False):
             label = get_label(off, labels)
             curr_sent['orig_labels'].append(label)
             curr_sent['labels'].append(tag2idx[label])
-        curr_sent['labels'] = curr_sent['labels'] + ([0] * padding_length)
+        
+        # PERUBAHAN: Pad labels ke max_length jika diperlukan
+        while len(curr_sent['labels']) < max_len:
+            curr_sent['labels'].append(0)
+        
+        # Truncate labels jika lebih panjang dari max_len
+        curr_sent['labels'] = curr_sent['labels'][:max_len]
 
-    curr_sent['input_ids'] = tok['input_ids'] + ([0] * padding_length)
-    curr_sent['token_type_ids'] = tok['token_type_ids'] + \
-        ([0] * padding_length)
-    curr_sent['attention_mask'] = tok['attention_mask'] + \
-        ([0] * padding_length)
+    # PERUBAHAN: Tidak perlu manual padding lagi
+    curr_sent['input_ids'] = tok['input_ids']
+    curr_sent['token_type_ids'] = tok['token_type_ids']
+    curr_sent['attention_mask'] = tok['attention_mask']
+    
     return curr_sent
+
 
 class ResumeDataset(Dataset):
     def __init__(self, resume, tokenizer, tag2idx, max_len, is_test=False):
@@ -139,6 +153,7 @@ class ResumeDataset(Dataset):
             'labels': torch.tensor(data['labels'], dtype=torch.long),
             'orig_label': data['orig_labels']
         }
+
 
 def get_hyperparameters(model, ff):
 
@@ -167,6 +182,7 @@ def get_hyperparameters(model, ff):
 
     return optimizer_grouped_parameters
 
+
 def get_special_tokens(tokenizer, tag2idx):
     vocab = tokenizer.get_vocab()
     pad_tok = vocab["[PAD]"]
@@ -175,6 +191,7 @@ def get_special_tokens(tokenizer, tag2idx):
     o_lab = tag2idx["O"]
 
     return pad_tok, sep_tok, cls_tok, o_lab
+
 
 def annot_confusion_matrix(valid_tags, pred_tags):
     """
@@ -192,201 +209,340 @@ def annot_confusion_matrix(valid_tags, pred_tags):
 
     return content
 
+
 def flat_accuracy(valid_tags, pred_tags):
     return (np.array(valid_tags) == np.array(pred_tags)).mean()
 
-def evaluate_model_with_report(model, dataloader, idx2tag, tag2idx, device):
-    """
-    Evaluates model and generates classification report
-    
-    Args:
-        model: Model to evaluate
-        dataloader: DataLoader for evaluation data
-        idx2tag: Dictionary to convert tag indices to tag strings
-        tag2idx: Dictionary to convert tag strings to indices
-        device: Device to run the model on (cuda/cpu)
-    
-    Returns:
-        dict: Dictionary containing evaluation metrics (loss, accuracy) and classification report
-    """
-    model.eval()
-    
-    all_true_labels = []
-    all_predicted_labels = []
-    total_eval_loss = 0
-    total_correct = 0
-    total_tokens = 0
-    
-    with torch.no_grad():
-        for batch in dataloader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            token_type_ids = batch['token_type_ids'].to(device)
-            
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-                labels=labels
-            )
-            
-            loss = outputs.loss
-            logits = outputs.logits
-            
-            # Process each sequence in the batch separately
-            for i in range(input_ids.size(0)):
-                # Get active tokens for this sequence (exclude [PAD], [CLS], [SEP])
-                seq_mask = attention_mask[i] == 1
-                seq_logits = logits[i][seq_mask]
-                seq_labels = labels[i][seq_mask]
-                
-                # Get predictions
-                _, seq_preds = torch.max(seq_logits, dim=1)
-                
-                # Convert to tag strings and collect
-                true_labels = [idx2tag.get(label.item(), "O") for label in seq_labels]
-                pred_labels = [idx2tag.get(pred.item(), "O") for pred in seq_preds]
-                
-                # Make sure lengths are identical
-                min_len = min(len(true_labels), len(pred_labels))
-                
-                # Add as complete sequences (with equal length)
-                if min_len > 0:
-                    all_true_labels.append(true_labels[:min_len])
-                    all_predicted_labels.append(pred_labels[:min_len])
-                
-                # Calculate token-level accuracy
-                correct_predictions = (seq_preds == seq_labels).sum().item()
-                total_correct += correct_predictions
-                total_tokens += seq_mask.sum().item()
-            
-            total_eval_loss += loss.item()
-    
-    # Calculate metrics
-    avg_loss = total_eval_loss / len(dataloader)
-    accuracy = total_correct / total_tokens if total_tokens > 0 else 0
-    
-    # Generate classification report
-    report = classification_report(all_true_labels, all_predicted_labels, digits=4)
-    
-    return {
-        "loss": avg_loss,
-        "accuracy": accuracy,
-        "classification_report": report
-    }
 
-def train_and_val_model(model, tokenizer, optimizer, epochs, idx2tag, tag2idx, max_grad_norm, device, train_dataloader, val_dataloader, output_path='.'):
-    """
-    Melatih dan memvalidasi model dengan pengumpulan metrik untuk visualisasi
-    
-    Returns:
-        tuple: (train_losses, val_losses, train_accuracies, val_accuracies)
-    """
-    train_losses = []
-    val_losses = []
-    train_accuracies = []
-    val_accuracies = []
-    
-    # Parameter early stopping
-    best_val_loss = float('inf')
-    patience = 5  # Jumlah epoch untuk menunggu sebelum early stopping
-    counter = 0
-    
-    for epoch in range(epochs):
-        # Training
+def train_and_val_model(
+    model,
+    tokenizer,
+    optimizer,
+    epochs,
+    idx2tag,
+    tag2idx,
+    max_grad_norm,
+    device,
+    train_dataloader,
+    valid_dataloader
+):
+
+    pad_tok, sep_tok, cls_tok, o_lab = get_special_tokens(tokenizer, tag2idx)
+
+    epoch = 0
+    for _ in trange(epochs, desc="Epoch"):
+        epoch += 1
+
+        # Training loop
+        print("Starting training loop.")
         model.train()
-        total_train_loss = 0
-        total_train_correct = 0
-        total_train_tokens = 0
-        
+        tr_loss, tr_accuracy = 0, 0
+        nb_tr_examples, nb_tr_steps = 0, 0
+        tr_preds, tr_labels = [], []
+
         for step, batch in enumerate(train_dataloader):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            token_type_ids = batch['token_type_ids'].to(device)
-            
-            model.zero_grad()
-            
+            # Add batch to gpu
+
+            # batch = tuple(t.to(device) for t in batch)
+            b_input_ids, b_input_mask, b_labels = batch['input_ids'], batch['attention_mask'], batch['labels']
+            b_input_ids, b_input_mask, b_labels = b_input_ids.to(
+                device), b_input_mask.to(device), b_labels.to(device)
+
+            # Forward pass
             outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-                labels=labels
+                b_input_ids,
+                token_type_ids=None,
+                attention_mask=b_input_mask,
+                labels=b_labels,
             )
-            
-            loss = outputs.loss
-            logits = outputs.logits
-            
-            # Calculate accuracy (token level)
-            active_tokens = attention_mask.view(-1) == 1
-            active_logits = logits.view(-1, len(tag2idx))[active_tokens]
-            active_labels = labels.view(-1)[active_tokens]
-            
-            _, predicted_tags = torch.max(active_logits, dim=1)
-            correct_predictions = (predicted_tags == active_labels).sum().item()
-            
-            total_train_correct += correct_predictions
-            total_train_tokens += active_tokens.sum().item()
-            
-            total_train_loss += loss.item()
-            
+            loss, tr_logits = outputs[:2]
+
+            # Backward pass
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+            # Compute train loss
+            tr_loss += loss.item()
+            nb_tr_examples += b_input_ids.size(0)
+            nb_tr_steps += 1
+
+            # Subset out unwanted predictions on CLS/PAD/SEP tokens
+            preds_mask = (
+                (b_input_ids != cls_tok)
+                & (b_input_ids != pad_tok)
+                & (b_input_ids != sep_tok)
+            )
+
+            tr_logits = tr_logits.cpu().detach().numpy()
+            tr_label_ids = torch.masked_select(b_labels, (preds_mask == 1))
+            preds_mask = preds_mask.cpu().detach().numpy()
+            tr_batch_preds = np.argmax(tr_logits[preds_mask.squeeze()], axis=1)
+            tr_batch_labels = tr_label_ids.to("cpu").numpy()
+            tr_preds.extend(tr_batch_preds)
+            tr_labels.extend(tr_batch_labels)
+
+            # Compute training accuracy
+            tmp_tr_accuracy = flat_accuracy(tr_batch_labels, tr_batch_preds)
+            tr_accuracy += tmp_tr_accuracy
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(
+                parameters=model.parameters(), max_norm=max_grad_norm
+            )
+
+            # Update parameters
             optimizer.step()
-        
-        avg_train_loss = total_train_loss / len(train_dataloader)
-        train_accuracy = total_train_correct / total_train_tokens if total_train_tokens > 0 else 0
-        
-        train_losses.append(avg_train_loss)
-        train_accuracies.append(train_accuracy)
-        
-        # Validation
+            model.zero_grad()
+
+        tr_loss = tr_loss / nb_tr_steps
+        tr_accuracy = tr_accuracy / nb_tr_steps
+
+        # Print training loss and accuracy per epoch
+        print(f"Train loss: {tr_loss}")
+        print(f"Train accuracy: {tr_accuracy}")
+
+        """
+        Validation loop
+        """
+        print("Starting validation loop.")
+
         model.eval()
-        total_val_loss = 0
-        total_val_correct = 0
-        total_val_tokens = 0
+        eval_loss, eval_accuracy = 0, 0
+        nb_eval_steps, nb_eval_examples = 0, 0
         
-        with torch.no_grad():
-            for batch in val_dataloader:
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels'].to(device)
-                token_type_ids = batch['token_type_ids'].to(device)
-                
+        # PERBAIKAN: Inisialisasi list untuk format seqeval yang benar
+        all_valid_tags = []  # List of lists untuk setiap sequence
+        all_pred_tags = []   # List of lists untuk setiap sequence
+
+        for batch in valid_dataloader:
+
+            b_input_ids, b_input_mask, b_labels = batch['input_ids'], batch['attention_mask'], batch['labels']
+            b_input_ids, b_input_mask, b_labels = b_input_ids.to(
+                device), b_input_mask.to(device), b_labels.to(device)
+
+            with torch.no_grad():
                 outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    token_type_ids=token_type_ids,
-                    labels=labels
+                    b_input_ids,
+                    token_type_ids=None,
+                    attention_mask=b_input_mask,
+                    labels=b_labels,
                 )
+                tmp_eval_loss, logits = outputs[:2]
+
+            # PERBAIKAN: Convert ke format seqeval yang benar
+            predictions_tensor = torch.argmax(logits, dim=-1)
+            
+            # Convert untuk setiap sequence dalam batch
+            batch_valid_tags = []
+            batch_pred_tags = []
+            
+            for i in range(predictions_tensor.shape[0]):
+                # Ambil sequence length berdasarkan attention mask
+                seq_len = b_input_mask[i].sum().item()
                 
-                loss = outputs.loss
-                logits = outputs.logits
+                # Skip [CLS] token (index 0) dan ambil sampai [SEP] token
+                valid_indices = range(1, seq_len - 1)
                 
-                # Calculate accuracy (token level)
-                active_tokens = attention_mask.view(-1) == 1
-                active_logits = logits.view(-1, len(tag2idx))[active_tokens]
-                active_labels = labels.view(-1)[active_tokens]
+                seq_valid_tags = []
+                seq_pred_tags = []
                 
-                _, predicted_tags = torch.max(active_logits, dim=1)
-                correct_predictions = (predicted_tags == active_labels).sum().item()
+                for j in valid_indices:
+                    # Skip padding tokens (label = -100)
+                    if b_labels[i][j] != -100:
+                        # Skip special tokens
+                        token_id = b_input_ids[i][j].item()
+                        if token_id not in [cls_tok, pad_tok, sep_tok]:
+                            seq_valid_tags.append(idx2tag[b_labels[i][j].item()])
+                            seq_pred_tags.append(idx2tag[predictions_tensor[i][j].item()])
                 
-                total_val_correct += correct_predictions
-                total_val_tokens += active_tokens.sum().item()
-                
-                total_val_loss += loss.item()
+                # Hanya tambahkan jika sequence tidak kosong
+                if seq_valid_tags and seq_pred_tags:
+                    batch_valid_tags.append(seq_valid_tags)
+                    batch_pred_tags.append(seq_pred_tags)
+            
+            # Extend ke list utama
+            all_valid_tags.extend(batch_valid_tags)
+            all_pred_tags.extend(batch_pred_tags)
+
+            # Hitung accuracy untuk kompatibilitas dengan kode lama
+            preds_mask = (
+                (b_input_ids != cls_tok)
+                & (b_input_ids != pad_tok)
+                & (b_input_ids != sep_tok)
+            )
+
+            logits_numpy = logits.cpu().detach().numpy()
+            label_ids = torch.masked_select(b_labels, (preds_mask == 1))
+            preds_mask_numpy = preds_mask.cpu().detach().numpy()
+            val_batch_preds = np.argmax(logits_numpy[preds_mask_numpy.squeeze()], axis=1)
+            val_batch_labels = label_ids.to("cpu").numpy()
+
+            tmp_eval_accuracy = flat_accuracy(val_batch_labels, val_batch_preds)
+
+            eval_loss += tmp_eval_loss.mean().item()
+            eval_accuracy += tmp_eval_accuracy
+
+            nb_eval_examples += b_input_ids.size(0)
+            nb_eval_steps += 1
+
+        # PERBAIKAN: Debug format data sebelum classification report
+        print(f"Debug - Type of all_valid_tags: {type(all_valid_tags)}")
+        print(f"Debug - Length of all_valid_tags: {len(all_valid_tags)}")
+        if all_valid_tags:
+            print(f"Debug - Type of all_valid_tags[0]: {type(all_valid_tags[0])}")
+            print(f"Debug - Sample all_valid_tags[0]: {all_valid_tags[0][:5] if len(all_valid_tags[0]) > 5 else all_valid_tags[0]}")
         
-        avg_val_loss = total_val_loss / len(val_dataloader)
-        val_accuracy = total_val_correct / total_val_tokens if total_val_tokens > 0 else 0
-        
-        val_losses.append(avg_val_loss)
-        val_accuracies.append(val_accuracy)
-        
-        print(f"Epoch {epoch+1}/{epochs}")
-        print(f"Training Loss: {avg_train_loss:.4f}, Accuracy: {train_accuracy:.4f}")
-        print(f"Validation Loss: {avg_val_loss:.4f}, Accuracy: {val_accuracy:.4f}")
-        
-        print("------")
+        print(f"Debug - Type of all_pred_tags: {type(all_pred_tags)}")
+        print(f"Debug - Length of all_pred_tags: {len(all_pred_tags)}")
+        if all_pred_tags:
+            print(f"Debug - Type of all_pred_tags[0]: {type(all_pred_tags[0])}")
+            print(f"Debug - Sample all_pred_tags[0]: {all_pred_tags[0][:5] if len(all_pred_tags[0]) > 5 else all_pred_tags[0]}")
+
+        # Evaluate loss, acc, conf. matrix, and class. report on devset
+        eval_loss = eval_loss / nb_eval_steps
+        eval_accuracy = eval_accuracy / nb_eval_steps
+
+        # PERBAIKAN: Generate classification report dengan format yang benar
+        try:
+            if all_valid_tags and all_pred_tags and len(all_valid_tags) == len(all_pred_tags):
+                # Clean data untuk memastikan tidak ada nested lists atau masalah lain
+                cleaned_valid_tags = []
+                cleaned_pred_tags = []
+                
+                for i in range(len(all_valid_tags)):
+                    if isinstance(all_valid_tags[i], list) and isinstance(all_pred_tags[i], list):
+                        # Pastikan semua elemen adalah string
+                        valid_seq = [str(tag) for tag in all_valid_tags[i] if tag is not None]
+                        pred_seq = [str(tag) for tag in all_pred_tags[i] if tag is not None]
+                        
+                        # Hanya tambahkan jika kedua sequence memiliki panjang yang sama dan tidak kosong
+                        if len(valid_seq) == len(pred_seq) and len(valid_seq) > 0:
+                            cleaned_valid_tags.append(valid_seq)
+                            cleaned_pred_tags.append(pred_seq)
+                
+                print(f"Cleaned sequences: {len(cleaned_valid_tags)}")
+                
+                if cleaned_valid_tags and cleaned_pred_tags:
+                    # Coba dengan sklearn classification_report sebagai alternatif
+                    try:
+                        from sklearn.metrics import classification_report as sklearn_report
+                        from sklearn.metrics import confusion_matrix
+                        
+                        # Flatten untuk sklearn
+                        flat_valid = [tag for seq in cleaned_valid_tags for tag in seq]
+                        flat_pred = [tag for seq in cleaned_pred_tags for tag in seq]
+                        
+                        sklearn_cl_report = sklearn_report(flat_valid, flat_pred, zero_division=0)
+                        
+                        print(f"Validation loss: {eval_loss}")
+                        print(f"Validation Accuracy: {eval_accuracy}")
+                        print(f"Classification Report (sklearn):\n{sklearn_cl_report}")
+                        
+                        # Confusion matrix
+                        unique_labels = sorted(list(set(flat_valid + flat_pred)))
+                        conf_matrix = confusion_matrix(flat_valid, flat_pred, labels=unique_labels)
+                        print(f"Confusion Matrix Labels: {unique_labels}")
+                        print(f"Confusion Matrix:\n{conf_matrix}")
+                        
+                    except ImportError:
+                        # Jika sklearn tidak tersedia, gunakan seqeval
+                        cl_report = classification_report(cleaned_valid_tags, cleaned_pred_tags)
+                        
+                        print(f"Validation loss: {eval_loss}")
+                        print(f"Validation Accuracy: {eval_accuracy}")
+                        print(f"Classification Report (seqeval):\n{cl_report}")
+                        
+                        # Coba confusion matrix
+                        try:
+                            conf_mat = annot_confusion_matrix(cleaned_valid_tags, cleaned_pred_tags)
+                            print(f"Confusion Matrix:\n{conf_mat}")
+                        except:
+                            print("Could not generate confusion matrix")
+                            
+                else:
+                    print(f"Validation loss: {eval_loss}")
+                    print(f"Validation Accuracy: {eval_accuracy}")
+                    print("Warning: No valid sequences after cleaning")
+                    
+            else:
+                print(f"Validation loss: {eval_loss}")
+                print(f"Validation Accuracy: {eval_accuracy}")
+                print("Warning: Cannot generate classification report due to data format issues")
+                print(f"Valid tags length: {len(all_valid_tags) if all_valid_tags else 0}")
+                print(f"Pred tags length: {len(all_pred_tags) if all_pred_tags else 0}")
+                
+        except Exception as e:
+            print(f"Error generating classification report: {e}")
+            print(f"Validation loss: {eval_loss}")
+            print(f"Validation Accuracy: {eval_accuracy}")
+            
+            # Alternative: Manual metrics calculation
+            try:
+                # Flatten all data
+                flat_valid_tags = [tag for seq in all_valid_tags for tag in seq if seq and tag]
+                flat_pred_tags = [tag for seq in all_pred_tags for tag in seq if seq and tag]
+                
+                if len(flat_valid_tags) == len(flat_pred_tags):
+                    # Calculate basic metrics manually
+                    correct = sum(1 for v, p in zip(flat_valid_tags, flat_pred_tags) if v == p)
+                    total = len(flat_valid_tags)
+                    token_accuracy = correct / total if total > 0 else 0
+                    
+                    # Count by class
+                    unique_tags = set(flat_valid_tags + flat_pred_tags)
+                    tag_stats = {}
+                    
+                    for tag in unique_tags:
+                        true_pos = sum(1 for v, p in zip(flat_valid_tags, flat_pred_tags) if v == tag and p == tag)
+                        false_pos = sum(1 for v, p in zip(flat_valid_tags, flat_pred_tags) if v != tag and p == tag)
+                        false_neg = sum(1 for v, p in zip(flat_valid_tags, flat_pred_tags) if v == tag and p != tag)
+                        
+                        precision = true_pos / (true_pos + false_pos) if (true_pos + false_pos) > 0 else 0
+                        recall = true_pos / (true_pos + false_neg) if (true_pos + false_neg) > 0 else 0
+                        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                        
+                        tag_stats[tag] = {
+                            'precision': precision,
+                            'recall': recall,
+                            'f1': f1,
+                            'support': sum(1 for v in flat_valid_tags if v == tag)
+                        }
+                    
+                    print("\nManual Classification Report:")
+                    print(f"Token Accuracy: {token_accuracy:.4f}")
+                    print(f"{'Tag':<20} {'Precision':<10} {'Recall':<10} {'F1':<10} {'Support':<10}")
+                    print("-" * 70)
+                    
+                    for tag, stats in sorted(tag_stats.items()):
+                        print(f"{tag:<20} {stats['precision']:<10.4f} {stats['recall']:<10.4f} {stats['f1']:<10.4f} {stats['support']:<10}")
+                    
+                    print(f"\nUnique predicted tags: {set(flat_pred_tags)}")
+                    print(f"Unique true tags: {set(flat_valid_tags)}")
+                else:
+                    print(f"Length mismatch: valid={len(flat_valid_tags)}, pred={len(flat_pred_tags)}")
+                    
+            except Exception as manual_error:
+                print(f"Manual calculation also failed: {manual_error}")
+                print("Only showing basic validation metrics")
+                print(f"Unique predicted tags: {set([tag for seq in all_pred_tags for tag in seq if seq and tag])}")
+                print(f"Unique true tags: {set([tag for seq in all_valid_tags for tag in seq if seq and tag])}")
+
+# Fungsi helper untuk debugging
+def debug_seqeval_format(valid_tags, pred_tags):
+    """
+    Debug function untuk memeriksa format data seqeval
+    """
+    print("=== DEBUG SEQEVAL FORMAT ===")
+    print(f"valid_tags type: {type(valid_tags)}")
+    print(f"pred_tags type: {type(pred_tags)}")
+    print(f"valid_tags length: {len(valid_tags)}")
+    print(f"pred_tags length: {len(pred_tags)}")
     
-    return train_losses, val_losses, train_accuracies, val_accuracies
+    if valid_tags and len(valid_tags) > 0:
+        print(f"valid_tags[0] type: {type(valid_tags[0])}")
+        print(f"valid_tags[0]: {valid_tags[0]}")
+        
+    if pred_tags and len(pred_tags) > 0:
+        print(f"pred_tags[0] type: {type(pred_tags[0])}")
+        print(f"pred_tags[0]: {pred_tags[0]}")
+    
+    print("=== END DEBUG ===")

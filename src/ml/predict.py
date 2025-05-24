@@ -1,700 +1,728 @@
-import pandas as pd
 import torch
-import argparse
+import numpy as np
 import json
-import csv
-import os
-from transformers import AutoModelForTokenClassification, AutoTokenizer, BertTokenizerFast
-from tqdm import tqdm
+import argparse
 import re
+import fitz
+import os
+from transformers import BertForTokenClassification, BertTokenizerFast, AutoTokenizer
+from scipy.special import softmax
+import string
 
-tags_vals = ["UNKNOWN", "O", "Name", "Degree", "Skills", "College Name", "Email Address",
-             "Designation", "Companies worked at", "Graduation Year", "Years of Experience", "Location"]
-
-tag2idx = {t: i for i, t in enumerate(tags_vals)}
-idx2tag = {i: t for i, t in enumerate(tags_vals)}
-restricted_labels = ["UNKNOWN", "O"]
-
-def adjust_to_word_boundaries(text, start, end):
-    """Adjust entity boundaries to align with word boundaries"""
-    # Ensure we're within text bounds
-    text_len = len(text)
-    start = max(0, min(start, text_len - 1))
-    end = max(0, min(end, text_len))
-    
-    # If start is in the middle of a word, move it to the beginning of the word
-    while start > 0 and text[start-1].isalnum():
-        start -= 1
-    
-    # If end is in the middle of a word, move it to the end of the word
-    while end < text_len and text[end].isalnum():
-        end += 1
-    
-    return start, end
-
-def preprocess_text(text):
+class ResumeNERPredictor:
     """
-    Preprocess text by:
-    1. Replacing tab characters (\\t) with spaces
-    2. Replacing newlines (\\n) with spaces
-    3. Replacing Unicode escape sequences (\\u followed by 4 characters) with empty strings
-    4. Replacing multiple spaces with a single space
+    A class to extract named entities from resume text using a BERT-based NER model.
+    """
     
-    Args:
-        text (str): The input text to preprocess
+    def __init__(self, model_path=None, max_len=512, overlap=100):
+        """
+        Initialize the ResumeNERPredictor with a pre-trained model.
         
-    Returns:
-        str: The preprocessed text
-    """
-    if not text or not isinstance(text, str):
-        return ""  # Return empty string instead of None
+        Args:
+            model_path (str): Path to the saved model file (.bin)
+            max_len (int): Maximum sequence length for BERT input
+            overlap (int): Number of tokens to overlap between chunks
+        """
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.max_len = max_len
+        self.overlap = overlap
+        
+        # Define entity mapping
+        self.entity_dict = {
+            'Name': 'Name',
+            'Degree': 'Degree', 
+            'Skills': 'Skills',
+            'College Name': 'College Name',
+            'Email Address': 'Email Address',
+            'Designation': 'Designation',
+            'Companies worked at': 'Companies worked at',
+            'Graduation Year': 'Graduation Year',
+            'Years of Experience': 'Years of Experience',
+            'Location': 'Location'
+        }
+        
+        # Define tags
+        self.tags_vals = ["UNKNOWN", "O", "Name", "Degree", "Skills", "College Name", "Email Address",
+                         "Designation", "Companies worked at", "Graduation Year", "Years of Experience", "Location"]
+        
+        self.tag2idx = {t: i for i, t in enumerate(self.tags_vals)}
+        self.idx2tag = {i: t for i, t in enumerate(self.tags_vals)}
+        
+        # Label yang tidak perlu ditampilkan
+        self.restricted_labels = ['O', 'UNKNOWN']
+        
+        # Load tokenizer
+        print("Loading tokenizer...")
+        try:
+            if os.path.exists('./vocab/vocab.txt'):
+                self.tokenizer = BertTokenizerFast('./vocab/vocab.txt', lowercase=True)
+            else:
+                self.tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+        except Exception as e:
+            print(f"Could not load custom vocab ({e}), using default tokenizer")
+            self.tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+        
+        # Load model
+        print(f"Loading model from {model_path if model_path else 'bert-base-uncased'}...")
+        
+        if model_path and os.path.exists(model_path):
+            self.model = BertForTokenClassification.from_pretrained(
+                'bert-base-uncased', 
+                num_labels=len(self.tag2idx)
+            )
+            
+            # Load state dict
+            try:
+                checkpoint = torch.load(model_path, map_location=self.device)
+                if 'model_state_dict' in checkpoint:
+                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                else:
+                    self.model.load_state_dict(checkpoint)
+                print(f"Model loaded successfully from {model_path}")
+            except Exception as e:
+                print(f"Error loading model: {e}")
+                print("Using base model instead")
+        else:
+            self.model = BertForTokenClassification.from_pretrained(
+                'bert-base-uncased',
+                num_labels=len(self.tag2idx)
+            )
+            print("No model path provided or file not found, using base model")
+            
+        self.model.to(self.device)
+        self.model.eval()
     
-    # Replace tabs with spaces
-    processed_text = text.replace('\t', ' ')
+    def pdf_to_text(self, pdf_path):
+        """Convert PDF to text"""
+        print("Processing PDF to extract text...")
+        try:
+            doc = fitz.open(pdf_path)
+            
+            text = ''
+            for page in doc:
+                text += page.get_text()
+            
+            doc.close()
+            
+            # Remove new line dan normalize whitespace
+            text = ' '.join(text.split('\n'))
+            text = re.sub(r'\s+', ' ', text.strip())
+            
+            return text
+        except Exception as e:
+            print(f"Error processing PDF: {e}")
+            return ""
     
-    # Replace newlines with spaces
-    processed_text = processed_text.replace('\n', ' ')
+    def split_text_by_sentences(self, text, max_sentence_length=400):
+        """
+        Membagi teks berdasarkan tanda titik (.) dengan mempertimbangkan panjang maksimal
+        """
+        if not text:
+            return []
+            
+        # Split berdasarkan titik, tapi pertahankan titik
+        sentences = re.split(r'(\. |\.$)', text)
+        
+        # Gabungkan kembali dengan titik
+        processed_sentences = []
+        current_sentence = ""
+        
+        for i, part in enumerate(sentences):
+            if part in ['. ', '.$']:
+                current_sentence += part
+                if len(current_sentence.strip()) > 0:
+                    processed_sentences.append(current_sentence.strip())
+                    current_sentence = ""
+            else:
+                current_sentence += part
+        
+        # Tambahkan sisa teks jika ada
+        if current_sentence.strip():
+            processed_sentences.append(current_sentence.strip())
+        
+        # Jika masih ada kalimat yang terlalu panjang, split berdasarkan newline atau koma
+        final_sentences = []
+        for sentence in processed_sentences:
+            if len(sentence) <= max_sentence_length:
+                final_sentences.append(sentence)
+            else:
+                # Split berdasarkan newline atau koma jika terlalu panjang
+                sub_parts = re.split(r'(\n|, )', sentence)
+                current_part = ""
+                
+                for sub_part in sub_parts:
+                    if len(current_part + sub_part) <= max_sentence_length:
+                        current_part += sub_part
+                    else:
+                        if current_part.strip():
+                            final_sentences.append(current_part.strip())
+                        current_part = sub_part
+                
+                if current_part.strip():
+                    final_sentences.append(current_part.strip())
+        
+        return [s for s in final_sentences if len(s.strip()) > 0]
     
-    # Replace Unicode escape sequences (\u followed by 4 characters)
-    processed_text = re.sub(r'\\u[0-9a-fA-F]{4}', '', processed_text)
+    def tokenize_resume(self, resume_text):
+        """
+        Tokenize resume text menggunakan BERT tokenizer
+        """
+        encoding = self.tokenizer(
+            resume_text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_len,
+            return_tensors='pt',
+            return_offsets_mapping=True
+        )
+        
+        return {
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
+            'offset_mapping': encoding['offset_mapping'].squeeze()
+        }
     
-    # Replace multiple spaces with a single space
-    processed_text = re.sub(r'\s+', ' ', processed_text)
-    
-    # Strip leading and trailing spaces
-    processed_text = processed_text.strip()
-    
-    return processed_text
-
-def tokenize_resume(text, tokenizer, max_len):
-    """Tokenize resume text using the provided tokenizer"""
-    tok = tokenizer.encode_plus(
-        text, max_length=max_len, return_offsets_mapping=True, truncation=True)
-    curr_sent = dict()
-    padding_length = max_len - len(tok['input_ids'])
-    curr_sent['input_ids'] = tok['input_ids'] + ([0] * padding_length)
-    curr_sent['token_type_ids'] = tok['token_type_ids'] + \
-        ([0] * padding_length)
-    curr_sent['attention_mask'] = tok['attention_mask'] + \
-        ([0] * padding_length)
-    final_data = {
-        'input_ids': torch.tensor(curr_sent['input_ids'], dtype=torch.long),
-        'token_type_ids': torch.tensor(curr_sent['token_type_ids'], dtype=torch.long),
-        'attention_mask': torch.tensor(curr_sent['attention_mask'], dtype=torch.long),
-        'offset_mapping': tok['offset_mapping']
-    }
-    return final_data
-
-def predict_entities(text, model, tokenizer, device, max_length=500, threshold=0.5, debug=False):
-    """Extract entities from text using the NER model"""
-    text = preprocess_text(text)
-    entities = []
-    
-    if not text or len(text.strip()) == 0:
+    def predict_single_sentence(self, sentence_text):
+        """
+        Prediksi entitas dari satu kalimat dengan perbaikan untuk menangani subword tokenization
+        """
+        if not sentence_text or not sentence_text.strip():
+            return []
+            
+        data = self.tokenize_resume(sentence_text)
+        
+        # Prepare input untuk model
+        input_ids = data['input_ids'].unsqueeze(0)
+        input_mask = data['attention_mask'].unsqueeze(0)
+        
+        # Move ke device
+        input_ids = input_ids.to(self.device)
+        input_mask = input_mask.to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids,
+                token_type_ids=None,
+                attention_mask=input_mask,
+            )
+            logits = outputs.logits
+        
+        # Convert ke numpy dan dapatkan prediksi
+        logits = logits.cpu().detach().numpy()
+        label_ids = np.argmax(logits, axis=2)
+        
+        # Rekonstruksi entitas dengan menangani subword tokenization
+        entities = []
+        current_entity = None
+        
+        for i, (label_id, offset) in enumerate(zip(label_ids[0], data['offset_mapping'])):
+            if label_id >= len(self.idx2tag):
+                continue
+                
+            curr_id = self.idx2tag[label_id]
+            curr_start = offset[0].item()
+            curr_end = offset[1].item()
+            
+            # Skip restricted labels dan token [CLS], [SEP], [PAD]
+            if curr_id in self.restricted_labels or curr_start == curr_end:
+                # Jika ada entitas yang sedang dibangun, selesaikan
+                if current_entity is not None:
+                    entities.append(current_entity)
+                    current_entity = None
+                continue
+            
+            # Jika ini adalah entitas baru atau berbeda dari yang sebelumnya
+            if current_entity is None or current_entity['entity'] != curr_id:
+                # Selesaikan entitas sebelumnya jika ada
+                if current_entity is not None:
+                    entities.append(current_entity)
+                
+                # Mulai entitas baru
+                current_entity = {
+                    'entity': curr_id,
+                    'start': curr_start,
+                    'end': curr_end
+                }
+            else:
+                # Lanjutkan entitas yang sama (handle subword)
+                # Periksa apakah token ini bersebelahan atau bagian dari kata yang sama
+                gap = curr_start - current_entity['end']
+                if gap <= 2:  # Toleransi untuk spasi atau karakter pemisah
+                    current_entity['end'] = curr_end
+                else:
+                    # Gap terlalu besar, selesaikan entitas sebelumnya dan mulai yang baru
+                    entities.append(current_entity)
+                    current_entity = {
+                        'entity': curr_id,
+                        'start': curr_start,
+                        'end': curr_end
+                    }
+        
+        # Selesaikan entitas terakhir jika ada
+        if current_entity is not None:
+            entities.append(current_entity)
+        
+        # Tambahkan teks dan perluas batas untuk menangkap kata lengkap
+        for ent in entities:
+            # Perluas ke kiri untuk menangkap awal kata yang lengkap
+            start_pos = ent['start']
+            while start_pos > 0 and not sentence_text[start_pos-1].isspace():
+                start_pos -= 1
+            
+            # Perluas ke kanan untuk menangkap akhir kata yang lengkap
+            end_pos = ent['end']
+            while end_pos < len(sentence_text) and not sentence_text[end_pos].isspace():
+                end_pos += 1
+            
+            # Untuk nama, perluas lebih jauh untuk menangkap nama lengkap
+            if ent['entity'] == 'Name':
+                # Perluas ke kiri untuk menangkap nama depan
+                while start_pos > 0 and sentence_text[start_pos-1:start_pos] not in ['.', ',', '\n', '\t']:
+                    if sentence_text[start_pos-1].isspace():
+                        # Periksa apakah kata sebelumnya adalah bagian dari nama
+                        prev_word_start = start_pos - 1
+                        while prev_word_start > 0 and sentence_text[prev_word_start-1].isspace():
+                            prev_word_start -= 1
+                        while prev_word_start > 0 and not sentence_text[prev_word_start-1].isspace():
+                            prev_word_start -= 1
+                        
+                        prev_word = sentence_text[prev_word_start:start_pos-1].strip()
+                        # Jika kata sebelumnya adalah nama (huruf kapital dan bukan kata umum)
+                        if (prev_word and prev_word[0].isupper() and 
+                            prev_word.lower() not in ['mr', 'mrs', 'ms', 'dr', 'prof', 'the', 'and']):
+                            start_pos = prev_word_start
+                        else:
+                            break
+                    else:
+                        start_pos -= 1
+                
+                # Perluas ke kanan untuk menangkap nama belakang
+                while end_pos < len(sentence_text) and sentence_text[end_pos:end_pos+1] not in ['.', ',', '\n', '\t']:
+                    if sentence_text[end_pos].isspace():
+                        # Periksa apakah kata berikutnya adalah bagian dari nama
+                        next_word_end = end_pos + 1
+                        while next_word_end < len(sentence_text) and sentence_text[next_word_end].isspace():
+                            next_word_end += 1
+                        next_word_start = next_word_end
+                        while next_word_end < len(sentence_text) and not sentence_text[next_word_end].isspace():
+                            next_word_end += 1
+                        
+                        next_word = sentence_text[next_word_start:next_word_end].strip()
+                        # Jika kata berikutnya adalah nama (huruf kapital dan bukan kata umum)
+                        if (next_word and next_word[0].isupper() and 
+                            next_word.lower() not in ['born', 'from', 'in', 'at', 'the', 'and', 'email', 'phone']):
+                            end_pos = next_word_end
+                        else:
+                            break
+                    else:
+                        end_pos += 1
+            
+            # Update posisi dan teks entitas
+            ent['start'] = start_pos
+            ent['end'] = end_pos
+            ent['text'] = sentence_text[start_pos:end_pos].strip()
+        
         return entities
     
-    # Ensure we don't exceed maximum token limit
-    text = text[:max_length * 5]  # Rough estimate to avoid too many tokens
-    
-    # Use the provided tokenize_resume function
-    tokenized = tokenize_resume(text, tokenizer, max_length)
-    
-    input_ids = tokenized['input_ids'].unsqueeze(0).to(device)
-    attention_mask = tokenized['attention_mask'].unsqueeze(0).to(device)
-    offset_mapping = tokenized['offset_mapping']
-    
-    # Get predictions
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-    
-    logits = outputs.logits
-    probs = torch.nn.functional.softmax(logits, dim=2)
-    predictions = torch.argmax(logits, dim=2).cpu().numpy()[0]
-    scores = probs.max(dim=2)[0].cpu().numpy()[0]
-    
-    # Process predictions to get entities
-    current_entity = None
-    
-    for i, (pred, score, offset) in enumerate(zip(predictions, scores, offset_mapping)):
-        # Skip padding tokens
-        if attention_mask[0][i] == 0:
-            continue
+    def merge_adjacent_entities(self, entities):
+        """
+        Merge entitas yang bersebelahan dengan label yang sama
+        """
+        if not entities:
+            return entities
         
-        # Get the predicted tag and score
-        tag = idx2tag.get(pred, "UNKNOWN")
+        # Sort berdasarkan posisi start
+        entities.sort(key=lambda x: x['start'])
         
-        # Skip if below threshold or in restricted labels
-        if score < threshold or tag in restricted_labels:
-            # End any current entity
-            if current_entity:
-                # Adjust boundaries to word boundaries
-                start, end = adjust_to_word_boundaries(text, current_entity["start"], current_entity["end"])
-                current_entity["start"] = start
-                current_entity["end"] = end
-                current_entity["text"] = text[start:end]
-                entities.append(current_entity)
-                current_entity = None
-            continue
+        merged = []
+        current_entity = entities[0].copy()
         
-        # Extract the start and end position from offset mapping
-        if isinstance(offset, tuple) and len(offset) == 2:
-            start_pos, end_pos = offset
-        else:
-            continue
+        for entity in entities[1:]:
+            # Jika entitas sama dan posisinya bersebelahan atau overlapping
+            if (current_entity['entity'] == entity['entity'] and 
+                entity['start'] <= current_entity['end'] + 10):  # tolerance 10 karakter
+                # Extend current entity
+                current_entity['end'] = max(current_entity['end'], entity['end'])
+                # Hindari duplikasi text saat menggabungkan
+                if not current_entity['text'].endswith(entity['text']):
+                    current_entity['text'] = (current_entity['text'] + " " + entity['text']).strip()
+            else:
+                merged.append(current_entity)
+                current_entity = entity.copy()
         
-        # Skip special tokens
-        if start_pos == 0 and end_pos == 0:
-            continue
+        merged.append(current_entity)
+        return merged
+
+    def is_valid_entity(self, text, entity_type):
+        """
+        Validate if the extracted entity is a valid whole word/phrase
         
-        # Start a new entity if one doesn't exist
-        if current_entity is None:
-            current_entity = {
-                "type": tag,
-                "start": start_pos,
-                "end": end_pos,
-                "text": text[start_pos:end_pos],
-                "score": score.item()
+        Args:
+            text (str): Entity text to validate
+            entity_type (str): Type of entity
+            
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        if not text or not text.strip():
+            return False
+        
+        text = text.strip()
+        
+        # Remove entities that are too short (less than 2 characters), except for initials in names
+        if len(text) < 2 and entity_type != 'Name':
+            return False
+        elif entity_type == 'Name' and len(text) < 1:
+            return False
+        
+        # Remove entities that are only punctuation or symbols
+        if all(c in string.punctuation for c in text):
+            return False
+        
+        # Remove entities that are only numbers (unless it's graduation year)
+        if text.isdigit() and entity_type != 'Graduation Year':
+            return False
+        
+        # Remove entities with excessive punctuation
+        punct_ratio = sum(1 for c in text if c in string.punctuation) / len(text)
+        if punct_ratio > 0.5:  # More than 50% punctuation
+            return False
+        
+        # Specific validation for each entity type
+        if entity_type == 'Name':
+            # Names should contain alphabetic characters
+            if not any(c.isalpha() for c in text):
+                return False
+            
+            # Remove common non-name words and fragments
+            non_name_words = {
+                'resume', 'cv', 'curriculum', 'vitae', 'profile', 'summary', 'objective',
+                'email', 'phone', 'address', 'contact', 'experience', 'education',
+                'skills', 'work', 'employment', 'career', 'professional', 'personal',
+                'information', 'details', 'background', 'qualification', 'achievement'
             }
-        else:
-            # Check if it's the same entity type and continuous
-            if current_entity["type"] == tag and start_pos <= current_entity["end"]:
-                # Extend the entity
-                current_entity["end"] = end_pos
-                current_entity["text"] = text[current_entity["start"]:end_pos]
-                # Update score (use average)
-                current_entity["score"] = (current_entity["score"] + score.item()) / 2
-            else:
-                # End current entity and start a new one
-                # Adjust boundaries to word boundaries
-                start, end = adjust_to_word_boundaries(text, current_entity["start"], current_entity["end"])
-                current_entity["start"] = start
-                current_entity["end"] = end
-                current_entity["text"] = text[start:end]
-                entities.append(current_entity)
-                current_entity = {
-                    "type": tag,
-                    "start": start_pos,
-                    "end": end_pos,
-                    "text": text[start_pos:end_pos],
-                    "score": score.item()
-                }
-    
-    # Add the last entity if it exists
-    if current_entity:
-        # Adjust boundaries to word boundaries
-        start, end = adjust_to_word_boundaries(text, current_entity["start"], current_entity["end"])
-        current_entity["start"] = start
-        current_entity["end"] = end
-        current_entity["text"] = text[start:end]
-        entities.append(current_entity)
-    
-    return entities
+            if text.lower() in non_name_words:
+                return False
+            
+            # Remove single characters unless they are initials (uppercase)
+            if len(text) == 1 and not text.isupper():
+                return False
+            
+            # Remove fragments that are clearly not names
+            short_fragments = {'ar', 'al', 'bin', 'el', 'la', 'le', 'de', 'da', 'di'}
+            if len(text) <= 3 and text.lower() in short_fragments:
+                return False
+            
+            # Validate that it looks like a real name (contains vowels for longer names)
+            if len(text) >= 4:
+                vowels = set('aeiouAEIOU')
+                if not any(c in vowels for c in text):
+                    return False
+        
+        elif entity_type == 'Graduation Year':
+            # Should be a 4-digit year between 1950-2030
+            if not re.match(r'^\d{4}$', text):
+                return False
+            year = int(text)
+            if year < 1950 or year > 2030:
+                return False
+        
+        elif entity_type == 'Years of Experience':
+            # Should contain numbers and experience-related keywords
+            if not any(c.isdigit() for c in text):
+                return False
+        
+        elif entity_type == 'Skills':
+            # Skills should not be too generic
+            generic_skills = {'skill', 'skills', 'technical', 'soft', 'hard'}
+            if text.lower() in generic_skills:
+                return False
+        
+        elif entity_type == 'Location':
+            # Should contain alphabetic characters
+            if not any(c.isalpha() for c in text):
+                return False
+        
+        elif entity_type in ['College Name', 'Companies worked at', 'Degree', 'Designation']:
+            # Should contain alphabetic characters
+            if not any(c.isalpha() for c in text):
+                return False
+            # Remove single character entities
+            if len(text.replace(' ', '')) < 2:
+                return False
+        
+        return True
 
-def format_entities_dict(entities, debug=False):
-    """Convert entities to a dictionary by entity type"""
-    result = {}
-    
-    # Group entities by type
-    for entity in entities:
-        entity_type = entity["type"]
+    def clean_entity_text(self, text, entity_type):
+        """
+        Clean and normalize entity text
         
-        if entity_type not in result:
-            result[entity_type] = []
+        Args:
+            text (str): Entity text to clean
+            entity_type (str): Type of entity
+            
+        Returns:
+            str: Cleaned entity text
+        """
+        if not text:
+            return ""
         
-        if debug:
-            # Include full entity details including score
-            result[entity_type].append(entity)
-        else:
-            # Just include the text
-            result[entity_type].append(entity["text"])
-    
-    return result
+        # Remove leading/trailing whitespace
+        text = text.strip()
+        
+        # Remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove leading/trailing punctuation (except for emails)
+        if entity_type != 'Email Address':
+            text = text.strip(string.punctuation + ' ')
+        
+        # Specific cleaning for each entity type
+        if entity_type == 'Name':
+            # Capitalize first letters
+            text = ' '.join(word.capitalize() for word in text.split())
+        
+        elif entity_type == 'Email Address':
+            # Convert to lowercase
+            text = text.lower()
+        
+        elif entity_type in ['College Name', 'Companies worked at']:
+            # Basic title case
+            text = text.title()
+        
+        elif entity_type == 'Skills':
+            # Remove common prefixes/suffixes
+            prefixes = ['skill in', 'experience in', 'knowledge of']
+            for prefix in prefixes:
+                if text.lower().startswith(prefix):
+                    text = text[len(prefix):].strip()
+            
+            # Capitalize appropriately
+            text = text.title()
+        
+        return text
 
-def print_entities(resume_id, entities_dict, debug=False):
-    """Print extracted entities for a resume"""
-    print(f"\nEntities for resume {resume_id}:")
-    
-    if not entities_dict:
-        print("  No entities found")
-        return
-    
-    for entity_type, values in entities_dict.items():
-        print(f"  {entity_type}:")
-        if debug and values and isinstance(values[0], dict):  # Check if values exist
-            # Print with scores for debugging
-            for v in values:
-                print(f"    - {v['text']} (score: {v['score']:.4f})")
-        else:
-            # Regular printing
-            for v in values:
-                print(f"    - {v}")
-
-def save_sample_output(text, entities, tokenizer_output, predictions_output, output_file):
-    """Save sample output for debugging"""
-    sample_data = {
-        "text": text[:500] + "..." if len(text) > 500 else text,
-        "entities": entities,
-        "tokenizer_output": {
-            "input_ids": tokenizer_output["input_ids"].tolist(),
-            "attention_mask": tokenizer_output["attention_mask"].tolist()
-        },
-        "predictions": predictions_output
-    }
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(sample_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"Sample output saved to {output_file}")
-
-def save_results(results, output_file, debug=False):
-    """Save results to a CSV file"""
-    # Prepare data for CSV
-    csv_data = []
-    
-    for result in results:
-        resume_id = result['ID']
-        category = result['Category']
-        entities = result['Entities']
+    def deduplicate_entities(self, entities_list):
+        """
+        Remove duplicates and similar entities from a list, with special handling for names
         
-        # Format entities as JSON strings for each entity type
-        entity_columns = {}
-        for entity_type, values in entities.items():
-            if values:  # Check if values exist
-                if debug and isinstance(values[0], dict):
-                    # Format with scores for debugging
-                    formatted_values = [f"{v['text']} ({v['score']:.4f})" for v in values]
-                    entity_columns[entity_type] = "".join(formatted_values)
-                else:
-                    # Regular format without scores
-                    entity_columns[entity_type] = "|".join(values)
-            else:
-                entity_columns[entity_type] = ""
+        Args:
+            entities_list (list): List of entity strings
+            
+        Returns:
+            list: Deduplicated list
+        """
+        if not entities_list:
+            return []
         
-        # Create row with all data
-        row = {'ID': resume_id, 'Category': category}
-        row.update(entity_columns)
+        # Convert to lowercase for comparison
+        seen = set()
+        unique_entities = []
         
-        csv_data.append(row)
-
-    print(f"Preparing to save CSV with {len(csv_data)} rows")
-    if debug:
-        print(f"First row keys: {csv_data[0].keys() if csv_data else 'No data'}")
-    
-    # Get all possible columns (entity types)
-    all_columns = ['ID', 'Category']
-    for result in results:
-        for entity_type in result['Entities'].keys():
-            if entity_type not in all_columns:
-                all_columns.append(entity_type)
-    
-    print(f"All columns: {all_columns}")
-    
-    # Write to CSV
-    try:
-        with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=all_columns)
-            writer.writeheader()
-            for row in csv_data:
-                try:
-                    writer.writerow(row)
-                except Exception as e:
-                    print(f"Error writing row: {e}")
-                    print(f"Row: {row}")
-                    # Try to fix encoding issues in row values
-                    fixed_row = {k: str(v).encode('utf-8', 'ignore').decode('utf-8') if isinstance(v, str) else v 
-                                for k, v in row.items()}
-                    try:
-                        writer.writerow(fixed_row)
-                    except Exception as e2:
-                        print(f"Still failed after fixing encoding: {e2}")
-    except Exception as e:
-        print(f"Error saving results to CSV: {e}")
-        # Try with a different filename
-        backup_output = output_file + ".backup.csv"
-        print(f"Trying to save to backup file: {backup_output}")
-        with open(backup_output, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=all_columns)
-            writer.writeheader()
-            for row in csv_data:
-                writer.writerow({k: str(v).encode('utf-8', 'ignore').decode('utf-8') if isinstance(v, str) else v 
-                              for k, v in row.items()})
-
-def predict_entities_sliding_window(text, model, tokenizer, device, max_length=500, step=400, threshold=0.5, debug=False):
-    """Extract entities from text using a sliding window approach for long texts"""
-    text = preprocess_text(text)
-    
-    if not text or len(text.strip()) == 0:
-        return []
-    
-    # Process the entire text in sliding windows
-    text_length = len(text)
-    all_windows_entities = []
-    
-    # If text is shorter than max_length, process it in one go
-    if text_length <= max_length * 5:
-        return predict_entities(text, model, tokenizer, device, max_length, threshold, debug)
-    
-    # Otherwise, process text in overlapping windows
-    start_positions = list(range(0, text_length, step))
-    
-    if debug:
-        print(f"Processing long text ({text_length} chars) in {len(start_positions)} windows")
-    
-    for start_pos in start_positions:
-        end_pos = min(start_pos + max_length * 5, text_length)  # Take a large enough chunk for tokenization
-        chunk_text = text[start_pos:end_pos]
-        
-        # Get window position in original text
-        window_offset = start_pos
-        
-        # Process chunk
-        chunk_entities = predict_entities(chunk_text, model, tokenizer, device, max_length, threshold, debug)
-        
-        # Adjust entity positions based on window offset
-        for entity in chunk_entities:
-            entity["start"] += window_offset
-            entity["end"] += window_offset
-            # Update entity text from the original text to handle boundary issues
-            # Adjust to word boundaries
-            start, end = adjust_to_word_boundaries(text, entity["start"], entity["end"])
-            entity["start"] = start
-            entity["end"] = end
-            entity["text"] = text[start:end]
-            all_windows_entities.append(entity)
-    
-    # Merge overlapping entities (prefer the one with higher score)
-    all_windows_entities.sort(key=lambda e: (e["start"], -e["score"]))  # Sort by start pos, then by descending score
-    merged_entities = []
-    
-    # Improved entity merging logic
-    for entity in all_windows_entities:
-        # Flag to check if current entity was merged with any existing entity
-        merged = False
-        
-        # Check if this entity overlaps with any entity in merged_entities
-        for i, existing_entity in enumerate(merged_entities):
-            # Check for overlap
-            if (entity["start"] <= existing_entity["end"] and 
-                entity["end"] >= existing_entity["start"]):
+        # Special handling for names - merge fragments
+        if ('Name' in str(entities_list)):  # Check if this might be processing names
+            # Try to reconstruct full names from fragments
+            name_parts = []
+            for entity in entities_list:
+                entity = entity.strip()
+                if entity:
+                    name_parts.extend(entity.split())
+            
+            # If we have multiple parts, try to reconstruct the full name
+            if len(name_parts) > 1:
+                # Look for patterns like "Muhammad Bin Djafar Almasyhur"
+                reconstructed = ' '.join(name_parts)
+                # Remove duplicates in the reconstructed name
+                unique_parts = []
+                for part in name_parts:
+                    if part not in unique_parts:
+                        unique_parts.append(part)
                 
-                # If same entity type
-                if entity["type"] == existing_entity["type"]:
-                    # Calculate overlap extent
-                    overlap_start = max(entity["start"], existing_entity["start"])
-                    overlap_end = min(entity["end"], existing_entity["end"])
-                    overlap_length = overlap_end - overlap_start
-                    
-                    # Significant overlap (more than 20% of either entity)
-                    entity_length = entity["end"] - entity["start"]
-                    existing_length = existing_entity["end"] - existing_entity["start"]
-                    
-                    if (overlap_length > 0.2 * entity_length or 
-                        overlap_length > 0.2 * existing_length):
-                        
-                        # Merge based on score
-                        if entity["score"] > existing_entity["score"]:
-                            # Use the entity with the better score
-                            # But keep the widest span
-                            merged_start = min(entity["start"], existing_entity["start"])
-                            merged_end = max(entity["end"], existing_entity["end"])
-                            
-                            # Adjust to word boundaries
-                            merged_start, merged_end = adjust_to_word_boundaries(text, merged_start, merged_end)
-                            
-                            merged_entities[i] = {
-                                "type": entity["type"],
-                                "start": merged_start,
-                                "end": merged_end,
-                                "text": text[merged_start:merged_end],
-                                "score": entity["score"]
-                            }
-                        else:
-                            # Just extend the existing entity if needed
-                            if entity["start"] < existing_entity["start"] or entity["end"] > existing_entity["end"]:
-                                merged_start = min(entity["start"], existing_entity["start"])
-                                merged_end = max(entity["end"], existing_entity["end"])
-                                
-                                # Adjust to word boundaries
-                                merged_start, merged_end = adjust_to_word_boundaries(text, merged_start, merged_end)
-                                
-                                merged_entities[i] = {
-                                    "type": existing_entity["type"],
-                                    "start": merged_start,
-                                    "end": merged_end,
-                                    "text": text[merged_start:merged_end],
-                                    "score": existing_entity["score"]
-                                }
-                        
-                        merged = True
+                if len(unique_parts) > 1:
+                    return [' '.join(unique_parts)]
+        
+        for entity in entities_list:
+            entity_lower = entity.lower().strip()
+            
+            # Skip if we've seen this exact entity
+            if entity_lower in seen:
+                continue
+                
+            # Check for substring matches (avoid partial duplicates)
+            is_substring = False
+            for existing in list(seen):  # Create a copy to avoid modification during iteration
+                if entity_lower in existing or existing in entity_lower:
+                    # Keep the longer version
+                    if len(entity_lower) > len(existing):
+                        # Remove the shorter version and add the longer one
+                        unique_entities = [e for e in unique_entities if e.lower().strip() != existing]
+                        seen.discard(existing)
                         break
-        
-        # If the entity wasn't merged with any existing entity, add it
-        if not merged:
-            # Adjust once more to word boundaries before adding
-            start, end = adjust_to_word_boundaries(text, entity["start"], entity["end"])
-            entity["start"] = start
-            entity["end"] = end
-            entity["text"] = text[start:end]
-            merged_entities.append(entity)
-    
-    return merged_entities
-
-def process_csv(csv_file, model, tokenizer, device, output_file=None, batch_size=1, debug=False, threshold=0.5, sample_output=None, max_length=500, step=400, limit=None, use_sliding_window=True):
-    """Process each row in the CSV file"""
-    try:
-        # Read CSV file
-        df = pd.read_csv(csv_file)
-        
-        # Apply limit if specified
-        if limit and limit > 0:
-            df = df.head(limit)
-        
-        # Check if required column exists
-        if 'Resume_str' not in df.columns:
-            print("Error: CSV file must contain 'Resume_str' column")
-            return
-        
-        print(f"Processing {len(df)} resumes from CSV file...")
-        
-        # Prepare output data structure
-        all_results = []
-        
-        # Save sample output for debugging if requested
-        if sample_output and debug and not df.empty:
-            # Get first row for sample
-            sample_row = df.iloc[0]
-            sample_text = sample_row['Resume_str']
+                    else:
+                        is_substring = True
+                        break
             
-            # Prepare tokenizer output for sample
-            sample_tokenized = tokenize_resume(sample_text[:1000], tokenizer, max_length)
-            
-            # Get predictions for sample
-            input_ids = sample_tokenized['input_ids'].unsqueeze(0).to(device)
-            attention_mask = sample_tokenized['attention_mask'].unsqueeze(0).to(device)
-            
-            with torch.no_grad():
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            
-            logits = outputs.logits
-            predictions = torch.argmax(logits, dim=2).cpu().numpy()[0]
-            
-            # Format predictions
-            prediction_tags = [idx2tag.get(pred, "UNKNOWN") for pred in predictions]
-            
-            # Extract entities
-            if use_sliding_window:
-                sample_entities = predict_entities_sliding_window(
-                    sample_text[:1000], model, tokenizer, device, max_length, step, threshold, debug)
-            else:
-                sample_entities = predict_entities(
-                    sample_text[:1000], model, tokenizer, device, max_length, threshold, debug)
-            
-            # Save sample output
-            save_sample_output(
-                sample_text[:1000],
-                sample_entities,
-                sample_tokenized,
-                prediction_tags[:50],  # Just save first 50 predictions to keep file manageable
-                sample_output
-            )
-        
-        # Process each row with progress bar
-        for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing resumes"):
-            resume_id = row.get('ID', f"Row_{idx}")
-            resume_text = row['Resume_str']
-            category = row.get('Category', 'Unknown')
-            
-            if pd.isna(resume_text):
-                resume_text = ""  # Ensure resume_text is never None/NA
-            
-            if debug and idx % 10 == 0:
-                print(f"Processing resume {idx+1}/{len(df)} (ID: {resume_id})...")
-                print(f"Resume length: {len(resume_text)} characters")
-            
-            # Get entities using sliding window if text is long
-            if use_sliding_window:
-                entities = predict_entities_sliding_window(
-                    resume_text, model, tokenizer, device, max_length, step, threshold, debug)
-            else:
-                entities = predict_entities(
-                    resume_text, model, tokenizer, device, max_length, threshold, debug)
-            
-            # Post-processing: remove duplicates and ensure word boundaries
-            unique_entities = []
-            seen_texts = set()
-            
-            for entity in entities:
-                # Skip if we've seen this exact text before for this entity type
-                entity_key = f"{entity['type']}:{entity['text']}"
-                if entity_key in seen_texts:
-                    continue
-                
-                seen_texts.add(entity_key)
+            if not is_substring:
+                seen.add(entity_lower)
                 unique_entities.append(entity)
-            
-            # For debugging, print entity count
-            if debug:
-                print(f"Found {len(entities)} raw entities, {len(unique_entities)} unique entities for resume {resume_id}")
-            
-            # Format entities
-            entities_dict = format_entities_dict(unique_entities, debug)
-            
-            # For debugging, print entity types found
-            if debug:
-                print(f"Entity types found: {list(entities_dict.keys())}")
-            
-            # Print entities for this resume if in debug mode
-            if debug:
-                print_entities(resume_id, entities_dict, debug)
-            
-            # Add to results
-            result_row = {
-                'ID': resume_id,
-                'Category': category,
-                'Entities': entities_dict
-            }
-            all_results.append(result_row)
-            
-            # Save incremental results if output file is specified
-            if output_file and (idx + 1) % batch_size == 0:
-                try:
-                    save_results(all_results, output_file, debug)
-                    print(f"Incremental results saved ({idx + 1}/{len(df)})")
-                except Exception as e:
-                    print(f"Error saving incremental results: {e}")
         
-        # Save final results if output file is specified
-        if output_file:
-            try:
-                save_results(all_results, output_file, debug)
-                print(f"\nResults saved to {output_file}")
-            except Exception as e:
-                print(f"Error saving final results: {e}")
-                # Try with a simplified backup approach
-                backup_file = f"{output_file}.backup_simple.csv"
-                print(f"Trying to save simplified results to {backup_file}")
-                with open(backup_file, 'w', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['ID', 'Category', 'Raw_Entities'])
-                    for result in all_results:
-                        writer.writerow([result['ID'], result['Category'], str(result['Entities'])])
+        return unique_entities
+
+    def post_process_entities(self, result_json):
+        """
+        Post-process the extracted entities to improve quality
         
-        return all_results
+        Args:
+            result_json (dict): Raw extracted entities
+            
+        Returns:
+            dict: Post-processed entities
+        """
+        processed_result = {}
         
-    except Exception as e:
-        print(f"Error processing CSV file: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        for entity_type, entities in result_json.items():
+            # First, clean and validate each entity
+            cleaned_entities = []
+            for entity in entities:
+                cleaned = self.clean_entity_text(entity, entity_type)
+                if cleaned and self.is_valid_entity(cleaned, entity_type):
+                    cleaned_entities.append(cleaned)
+            
+            # Remove duplicates and similar entities
+            processed_result[entity_type] = self.deduplicate_entities(cleaned_entities)
+        
+        return processed_result
 
-def main():
-    parser = argparse.ArgumentParser(description='Extract entities from resume text in CSV file')
-    parser.add_argument('--csv_file', type=str, required=True, help='Path to the CSV file with Resume_str column')
-    parser.add_argument('--model_path', type=str, required=True, help='Path to the trained model state file')
-    parser.add_argument('--output_file', type=str, default='resume_entities.csv', help='Path to save the results CSV')
-    parser.add_argument('--model_name', type=str, default='dslim/bert-base-NER', help='Base model name for tokenizer')
-    parser.add_argument('--batch_size', type=int, default=10, help='Batch size for saving incremental results')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode with additional output')
-    parser.add_argument('--threshold', type=float, default=0.5, help='Confidence threshold for entity detection')
-    parser.add_argument('--sample_output', type=str, default=None, help='Path to save a sample output for debugging')
-    parser.add_argument('--max_length', type=int, default=500, help='Maximum token length for processing')
-    parser.add_argument('--step', type=int, default=400, help='Step size for sliding window (default: 400)')
-    parser.add_argument('--no_sliding_window', action='store_true', help='Disable sliding window for long texts')
-    parser.add_argument('--limit', type=int, default=None, help='Limit the number of records to process')
-    parser.add_argument('--verify_tags', action='store_true', help='Verify tag mappings with model config')
-
-    args = parser.parse_args()
-
-    # Check if files exist
-    if not os.path.isfile(args.csv_file):
-        print(f"Error: CSV file '{args.csv_file}' not found.")
-        return
+    def predict(self, text):
+        """
+        Extract named entities from input text by processing it in chunks
+        
+        Args:
+            text (str): Resume text content
+            
+        Returns:
+            dict: Dictionary with extracted entities
+        """
+        # Initialize result dictionary
+        result_json = {
+            'Name': [],
+            'College Name': [],
+            'Degree': [],
+            'Graduation Year': [],
+            'Years of Experience': [],
+            'Companies worked at': [],
+            'Designation': [],
+            'Skills': [],
+            'Location': [],
+            'Email Address': []
+        }
+        
+        if not text or not text.strip():
+            print("Warning: Empty text provided")
+            return result_json
+        
+        print("Splitting resume into sentences...")
+        sentences = self.split_text_by_sentences(text, max_sentence_length=self.max_len-100)
+        print(f"Resume split into {len(sentences)} parts")
+        
+        all_entities = []
+        
+        for i, sentence in enumerate(sentences):
+            print(f"Processing part {i+1}/{len(sentences)}: {sentence[:50]}...")
+            
+            # Prediksi untuk kalimat ini
+            sentence_entities = self.predict_single_sentence(sentence)
+            
+            # Langsung gunakan posisi relatif dalam kalimat
+            for entity in sentence_entities:
+                entity['original_text'] = sentence  # Simpan kalimat asli untuk reference
+                all_entities.append(entity)
+        
+        # Merge entitas yang bersebelahan dengan label yang sama
+        print("Merging adjacent entities...")
+        merged_entities = self.merge_adjacent_entities(all_entities)
+        
+        # Konversi ke format output yang diinginkan
+        print("Converting to output format...")
+        for entity in merged_entities:
+            entity_type = entity['entity']
+            entity_text = entity['text']
+            
+            if entity_type in result_json and entity_text:
+                result_json[entity_type].append(entity_text)
+        
+        # Post-process untuk membersihkan dan deduplikasi entitas
+        print("Post-processing entities...")
+        final_result = self.post_process_entities(result_json)
+        
+        # Urutkan hasil untuk konsistensi
+        for key in final_result:
+            if final_result[key]:
+                final_result[key].sort()
+        
+        print("Entity extraction completed!")
+        print(f"Extracted entities summary:")
+        for key, values in final_result.items():
+            if values:
+                print(f"  {key}: {len(values)} items")
+        
+        return final_result
     
-    if not os.path.isfile(args.model_path):
-        print(f"Error: Model file '{args.model_path}' not found.")
-        return
+    def predict_from_pdf(self, pdf_path):
+        """
+        Extract named entities from a PDF file
+        
+        Args:
+            pdf_path (str): Path to PDF file
+            
+        Returns:
+            dict: Dictionary with extracted entities
+        """
+        print(f"Extracting information from PDF: {pdf_path}")
+        text = self.pdf_to_text(pdf_path)
+        if not text:
+            print("Warning: No text extracted from PDF")
+            return {key: [] for key in self.entity_dict.keys()}
+        return self.predict(text)
+
+def export_results(results, output_path, format='json'):
+    """
+    Export extraction results to different formats
     
-    # Load tokenizer
-    print(f"Loading tokenizer from {args.model_name}...")
+    Args:
+        results (dict): Extraction results
+        output_path (str): Output file path
+        format (str): Output format ('json', 'txt', 'csv')
+    """
     try:
-        tokenizer = BertTokenizerFast.from_pretrained(args.model_name)
+        if format == 'json':
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+        
+        elif format == 'txt':
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for entity_type, entities in results.items():
+                    if entities:
+                        f.write(f"{entity_type}:\n")
+                        for entity in entities:
+                            f.write(f"  - {entity}\n")
+                        f.write("\n")
+        
+        elif format == 'csv':
+            import csv
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Entity Type', 'Value'])
+                for entity_type, entities in results.items():
+                    for entity in entities:
+                        writer.writerow([entity_type, entity])
+        
+        print(f"Results exported to {output_path}")
     except Exception as e:
-        print(f"Error loading tokenizer: {e}")
-        print("Trying to load tokenizer with local files...")
-        tokenizer = BertTokenizerFast.from_pretrained(args.model_name, local_files_only=True)
-    
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Load model
-    print(f"Loading model from {args.model_path}...")
-    try:
-        model = AutoModelForTokenClassification.from_pretrained(
-            args.model_name,
-            num_labels=len(idx2tag),
-            ignore_mismatched_sizes=True
-        )
-        
-        # Load trained model state
-        state_dict = torch.load(args.model_path, map_location=device)
-        if 'model_state_dict' in state_dict:
-            model.load_state_dict(state_dict['model_state_dict'])
-        else:
-            model.load_state_dict(state_dict)
-        
-        model.to(device)
-        model.eval()
-        
-        print(f"Model loaded successfully!")
-        
-        # Verify tag mappings if requested
-        if args.verify_tags:
-            try:
-                # Try to extract label mappings from model config
-                if hasattr(model.config, 'id2label') and model.config.id2label:
-                    model_tags = model.config.id2label
-                    print("Model's tag mappings:")
-                    for idx, tag in model_tags.items():
-                        print(f"  {idx}: {tag}")
-                    
-                    # Compare with our mappings
-                    print("\nComparing with hard-coded mappings:")
-                    for idx, tag in idx2tag.items():
-                        model_tag = model_tags.get(str(idx), None)
-                        if model_tag and model_tag != tag:
-                            print(f"Warning: Mismatch at index {idx} - Hard-coded: '{tag}', Model: '{model_tag}'")
-            except Exception as e:
-                print(f"Error verifying tags: {e}")
-        
-        print(f"Tag mapping being used: {idx2tag}")
-        
-        # Process CSV file
-        results = process_csv(
-            args.csv_file, 
-            model, 
-            tokenizer, 
-            device, 
-            args.output_file, 
-            args.batch_size, 
-            args.debug, 
-            args.threshold, 
-            args.sample_output, 
-            args.max_length,
-            args.step,
-            args.limit,
-            not args.no_sliding_window  # Use sliding window by default
-        )
-        
-        if results:
-            print(f"Processing completed. Found entities for {len(results)} resumes.")
-        else:
-            print("Processing failed or no results found.")
-    
-    except Exception as e:
-        print(f"Error loading or using model: {e}")
-        import traceback
-        traceback.print_exc()
-    
+        print(f"Error exporting results: {e}")
+
 if __name__ == "__main__":
-    main()
+    predictor = ResumeNERPredictor('results/model-state.bin')
+    results = predictor.predict_from_pdf('notebooks/cv_izra.pdf')
+    print(results)
+        

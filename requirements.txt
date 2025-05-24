@@ -13,3 +13,4 @@ minio
 nltk
 pymongo
 python-dotenv
+hf_xet
