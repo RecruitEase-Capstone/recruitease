@@ -721,8 +721,8 @@ def export_results(results, output_path, format='json'):
     except Exception as e:
         print(f"Error exporting results: {e}")
 
-if __name__ == "__main__":
-    predictor = ResumeNERPredictor('results/model-state.bin')
-    results = predictor.predict_from_pdf('notebooks/cv_izra.pdf')
-    print(results)
+# if __name__ == "__main__":
+#     predictor = ResumeNERPredictor('results/model-state.bin')
+#     results = predictor.predict_from_pdf('notebooks/cv_izra.pdf')
+#     print(results)
         
